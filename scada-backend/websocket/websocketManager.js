@@ -162,9 +162,14 @@ class WebSocketManager {
         if (!client) return;
 
         try {
+            // 🚀 CRITICAL FIX: Ensure projectId is an integer
+            const normalizedProjectId = parseInt(projectId);
+
+            console.log(`🐛 DEBUG: Subscribe - Raw projectId: ${projectId} (${typeof projectId}), Normalized: ${normalizedProjectId} (${typeof normalizedProjectId})`);
+
             const projectQuery = await pool.query(
                 'SELECT * FROM projects WHERE id = $1 AND user_id = $2',
-                [projectId, client.user.id]
+                [normalizedProjectId, client.user.id]
             );
 
             if (projectQuery.rows.length === 0) {
@@ -175,24 +180,24 @@ class WebSocketManager {
                 return;
             }
 
-            client.subscriptions.add(projectId);
+            client.subscriptions.add(normalizedProjectId);  // Store as integer
 
-            if (!this.projectSubscriptions.has(projectId)) {
-                this.projectSubscriptions.set(projectId, new Set());
+            if (!this.projectSubscriptions.has(normalizedProjectId)) {
+                this.projectSubscriptions.set(normalizedProjectId, new Set());
             }
-            this.projectSubscriptions.get(projectId).add(clientId);
+            this.projectSubscriptions.get(normalizedProjectId).add(clientId);
 
-            console.log(`📡 Client ${clientId} subscribed to project ${projectId}`);
+            console.log(`📡 Client ${clientId} subscribed to project ${normalizedProjectId} (integer)`);
+            console.log(`🐛 DEBUG: Current projectSubscriptions keys:`, Array.from(this.projectSubscriptions.keys()));
 
             this.sendToClient(clientId, {
                 type: 'subscribed',
-                projectId,
-                message: `Subscribed to real-time updates for project ${projectId}`
+                projectId: normalizedProjectId,
+                message: `Subscribed to real-time updates for project ${normalizedProjectId}`
             });
 
-            this.sendProjectStatus(clientId, projectId);
-            // NEW: Also send current alarm status
-            this.sendActiveAlarms(clientId, projectId);
+            this.sendProjectStatus(clientId, normalizedProjectId);
+            this.sendActiveAlarms(clientId, normalizedProjectId);
 
         } catch (error) {
             console.error('Error subscribing to project:', error);
@@ -202,6 +207,7 @@ class WebSocketManager {
             });
         }
     }
+
 
     // Send current project status
     async sendProjectStatus(clientId, projectId) {
@@ -391,13 +397,36 @@ class WebSocketManager {
 
     // Broadcast to all clients subscribed to a project
     broadcastToProject(projectId, message) {
-        const subscribers = this.projectSubscriptions.get(projectId);
-        if (!subscribers) return 0;
+        // 🚀 CRITICAL FIX: Ensure projectId is an integer
+        const normalizedProjectId = parseInt(projectId);
+
+        console.log('🐛 DEBUG broadcastToProject:', {
+            raw_projectId: projectId,
+            raw_type: typeof projectId,
+            normalized_projectId: normalizedProjectId,
+            normalized_type: typeof normalizedProjectId,
+            message_type: message.type,
+            total_project_subscriptions: this.projectSubscriptions.size,
+            subscription_keys: Array.from(this.projectSubscriptions.keys()),
+            has_subscribers_for_project: this.projectSubscriptions.has(normalizedProjectId)
+        });
+
+        const subscribers = this.projectSubscriptions.get(normalizedProjectId);
+        if (!subscribers) {
+            console.log(`🐛 DEBUG: No subscribers for project ${normalizedProjectId} (integer)`);
+            return 0;
+        }
+
+        console.log(`🐛 DEBUG: Found ${subscribers.size} subscribers for project ${normalizedProjectId}`);
 
         let sentCount = 0;
         for (const clientId of subscribers) {
-            if (this.sendToClient(clientId, message)) {
+            const sent = this.sendToClient(clientId, message);
+            if (sent) {
                 sentCount++;
+                console.log(`🐛 DEBUG: Successfully sent to client ${clientId}`);
+            } else {
+                console.log(`🐛 DEBUG: Failed to send to client ${clientId}`);
             }
         }
 
@@ -552,20 +581,23 @@ class WebSocketManager {
         const client = this.clients.get(clientId);
         if (!client) return;
 
-        client.subscriptions.delete(projectId);
+        // 🚀 CRITICAL FIX: Ensure projectId is an integer
+        const normalizedProjectId = parseInt(projectId);
 
-        if (this.projectSubscriptions.has(projectId)) {
-            this.projectSubscriptions.get(projectId).delete(clientId);
+        client.subscriptions.delete(normalizedProjectId);
 
-            if (this.projectSubscriptions.get(projectId).size === 0) {
-                this.projectSubscriptions.delete(projectId);
+        if (this.projectSubscriptions.has(normalizedProjectId)) {
+            this.projectSubscriptions.get(normalizedProjectId).delete(clientId);
+
+            if (this.projectSubscriptions.get(normalizedProjectId).size === 0) {
+                this.projectSubscriptions.delete(normalizedProjectId);
             }
         }
 
         this.sendToClient(clientId, {
             type: 'unsubscribed',
-            projectId,
-            message: `Unsubscribed from project ${projectId}`
+            projectId: normalizedProjectId,
+            message: `Unsubscribed from project ${normalizedProjectId}`
         });
     }
 

@@ -89,11 +89,12 @@ let wsManager = null;
 let dataEngine = null;
 let setDataCollectionEngine = null;
 
+
 // Initialize WebSocket manager WITH the server
 try {
     console.log('Loading WebSocket manager...');
     const WebSocketManager = require('./websocket/websocketManager');
-    wsManager = new WebSocketManager(server); // 🚀 FIXED: Pass server to constructor
+    wsManager = new WebSocketManager(server); // ✅ This is correct
     global.wsManager = wsManager;
     console.log('✅ WebSocket manager loaded successfully');
 } catch (error) {
@@ -105,9 +106,16 @@ try {
 try {
     console.log('Loading Data Collection Engine...');
     const DataCollectionEngine = require('./services/DataCollectionEngine');
-    dataEngine = new DataCollectionEngine();
+
+    // ✅ FIXED: Pass wsManager to constructor
+    dataEngine = new DataCollectionEngine(wsManager);
+
     global.dataEngine = dataEngine;
-    console.log('✅ Data Collection Engine loaded');
+    console.log('✅ Data Collection Engine loaded WITH WebSocket support');
+
+    // 🐛 DEBUG: Verify wsManager connection
+    console.log('🐛 DEBUG: DataCollectionEngine wsManager:', !!dataEngine.wsManager);
+
 } catch (error) {
     console.error('❌ Data Collection Engine failed to load:', error.message);
 }

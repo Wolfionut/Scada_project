@@ -175,11 +175,15 @@ class SimulationService {
         // Check alarms
         this.checkAlarmConditions(deviceState, tag.tag_name, newValue);
 
-        return {
+        // 🔥 ADD DEBUG LOGGING HERE:
+        const finalQuality = pattern.quality || 'good';
+        console.log(`🐛 DEBUG Quality - Tag: ${tag.tag_name}, Pattern Quality: ${pattern.quality}, Final Quality: ${finalQuality}, Type: ${typeof finalQuality}`);
+
+        const measurement = {
             tag_id: tag.tag_id,
             tag_name: tag.tag_name,
             value: newValue,
-            quality: pattern.quality || 'good',
+            quality: finalQuality,  // Use the debugged value
             timestamp: new Date(),
             device_id: deviceState.device_id,
             device_name: deviceState.device_name,
@@ -187,8 +191,17 @@ class SimulationService {
             simulation: true,
             source: 'individual_interval'
         };
-    }
 
+        // 🔥 LOG THE FINAL MEASUREMENT:
+        console.log(`🐛 DEBUG Final Measurement:`, {
+            tag_name: measurement.tag_name,
+            quality: measurement.quality,
+            quality_type: typeof measurement.quality,
+            value: measurement.value
+        });
+
+        return measurement;
+    }
     // Calculate realistic tag value (same as before)
     calculateTagValue(pattern, timeElapsed, lastValue) {
         let value;

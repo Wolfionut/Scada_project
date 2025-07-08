@@ -1,4 +1,4 @@
-// src/pages/AlarmsPage.js - Clean Version Based on Your Original Layout
+// src/pages/AlarmsPage.js - COMPLETE FIXED VERSION WITH SOUND INTEGRATION
 import React, { useEffect, useState } from 'react';
 import {
     Grid, Paper, Box, Typography, IconButton, Tooltip, Chip, Fab, Dialog,
@@ -32,12 +32,21 @@ import {
     Settings as SettingsIcon,
     Refresh as RefreshIcon,
     PlayArrow as PlayArrowIcon,
-    Stop as StopIcon
+    Stop as StopIcon,
+    VolumeUp as VolumeUpIcon,
+    VolumeOff as VolumeOffIcon,
+    VolumeDown as VolumeDownIcon
 } from '@mui/icons-material';
 import { useParams, useNavigate } from 'react-router-dom';
+import { useTheme } from '../context/ThemeContext';
 import axios from '../api/axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useRealTimeData } from '../hooks/useWebSocket';
+
+// FIXED ALARM SOUND IMPORTS:
+import { useAlarmSound } from '../context/AlarmSoundContext';
+import { AlarmSoundControls } from '../components/AlarmSoundControls';
+import { useAlarmSoundEffects } from '../hooks/useAlarmSoundEffects';
 
 function TabPanel({ children, value, index, ...other }) {
     return (
@@ -50,6 +59,7 @@ function TabPanel({ children, value, index, ...other }) {
 export default function AlarmsPage() {
     const { projectId } = useParams();
     const navigate = useNavigate();
+    const { isDark } = useTheme();
 
     // Enhanced WebSocket real-time data with alarm support
     const {
@@ -108,11 +118,65 @@ export default function AlarmsPage() {
     const [eventsPage, setEventsPage] = useState(0);
     const [eventsRowsPerPage, setEventsRowsPerPage] = useState(25);
 
+    // 🔧 FIXED: Moved BEFORE sound integration to avoid lexical declaration error
     // Use WebSocket real-time alarm data when available, fallback to API data
     const displayActiveAlarms = wsActiveAlarms?.length > 0 ? wsActiveAlarms : activeAlarms;
-    const displayAlarmSummary = wsAlarmSummary?.total_active > 0 ? wsAlarmSummary : alarmStats;
+    const displayAlarmSummary = Object.keys(wsAlarmSummary).length > 0 ? wsAlarmSummary : alarmStats;
 
-    // Fetch alarm rules (configuration)
+    // 🔧 FIXED: Better filtering for active alarms - MOVED UP
+    const getFilteredActiveAlarms = () => {
+        // Use WebSocket data if available, otherwise use API data
+        let alarms = wsActiveAlarms?.length > 0 ? wsActiveAlarms : activeAlarms;
+
+        console.log('🔧 Filtering active alarms:', {
+            source: wsActiveAlarms?.length > 0 ? 'WebSocket' : 'API',
+            total_alarms: alarms?.length || 0,
+            alarms_data: alarms
+        });
+
+        // 🔧 FIXED: Only show truly unacknowledged alarms
+        const filteredAlarms = (alarms || []).filter(alarm => {
+            if (!alarm) return false;
+
+            // 🔧 CRITICAL FIX: Handle different data structures from backend
+            const isTriggered = (
+                alarm.state === 'triggered' ||                           // Backend alarm_states.state
+                (alarm.current_state === 'triggered') ||                 // From JOIN with alarm_rules
+                (!alarm.acknowledged_at && !alarm.acknowledged_by) ||    // Not acknowledged
+                (alarm.state === undefined && !alarm.acknowledged_at)    // Legacy format
+            );
+
+            console.log(`🔧 Alarm ${alarm.rule_name || alarm.id}: state=${alarm.state}, current_state=${alarm.current_state}, ack_at=${alarm.acknowledged_at}, result=${isTriggered}`);
+
+            return isTriggered;
+        });
+
+        console.log('🔧 Filtered result:', {
+            original_count: alarms?.length || 0,
+            active_count: filteredAlarms.length,
+            filtered_alarms: filteredAlarms.map(a => ({ id: a.id, rule_name: a.rule_name, state: a.state }))
+        });
+
+        return filteredAlarms;
+    };
+
+    // Get the currently filtered active alarms for display - MOVED UP
+    const currentActiveAlarms = getFilteredActiveAlarms();
+
+    // ADD ALARM SOUND INTEGRATION - NOW SAFE TO USE currentActiveAlarms
+    const {
+        playAlarmSequence,
+        stopAlarm,
+        isEnabled: soundEnabled,
+        playTestSound,
+        currentAlarm,
+        soundStatus
+    } = useAlarmSound();
+
+    // Enable automatic sound triggering - NOW currentActiveAlarms exists
+    useAlarmSoundEffects(currentActiveAlarms, wsAlarmEvents);
+
+    // 🔧 FIXED: Fetch alarm rules (configuration)
     const fetchAlarmRules = () => {
         if (!projectId) return;
         console.log('📤 Fetching alarm rules...');
@@ -120,8 +184,10 @@ export default function AlarmsPage() {
         axios.get(`/alarms/project/${projectId}/rules`)
             .then(res => {
                 console.log('✅ Alarm rules fetched:', res.data);
-                setAlarmRules(res.data);
-                setFiltered(res.data);
+                // 🔧 FIX: Handle both array and object responses
+                const rules = Array.isArray(res.data) ? res.data : (res.data.rules || []);
+                setAlarmRules(rules);
+                setFiltered(rules);
             })
             .catch(err => {
                 console.error('❌ Failed to fetch alarm rules:', err);
@@ -129,15 +195,19 @@ export default function AlarmsPage() {
             });
     };
 
-    // Fetch active alarms
+    // 🔧 FIXED: Fetch active alarms with proper data handling
     const fetchActiveAlarms = () => {
         if (!projectId) return;
-        console.log('📤 Fetching active alarms...');
+        console.log('📤 Fetching active alarms (triggered only)...');
 
-        axios.get(`/alarms/project/${projectId}/active`)
+        // 🔧 FIX: Request only triggered alarms
+        axios.get(`/alarms/project/${projectId}/active?state=triggered`)
             .then(res => {
                 console.log('✅ Active alarms fetched:', res.data);
-                setActiveAlarms(res.data);
+                // 🔧 FIX: Handle both array and object responses
+                const alarms = Array.isArray(res.data) ? res.data : (res.data.alarms || []);
+                console.log('🔧 Processed active alarms:', alarms.length);
+                setActiveAlarms(alarms);
             })
             .catch(err => {
                 console.error('❌ Failed to fetch active alarms:', err);
@@ -145,7 +215,7 @@ export default function AlarmsPage() {
             });
     };
 
-    // Fetch alarm events (history)
+    // 🔧 FIXED: Fetch alarm events (history) with proper data handling
     const fetchAlarmEvents = () => {
         if (!projectId) return;
         console.log('📤 Fetching alarm events...');
@@ -153,7 +223,9 @@ export default function AlarmsPage() {
         axios.get(`/alarms/project/${projectId}/events?limit=100&days=7`)
             .then(res => {
                 console.log('✅ Alarm events fetched:', res.data);
-                setAlarmEvents(res.data);
+                // 🔧 FIX: Handle both array and object responses
+                const events = Array.isArray(res.data) ? res.data : (res.data.events || []);
+                setAlarmEvents(events);
             })
             .catch(err => {
                 console.error('❌ Failed to fetch alarm events:', err);
@@ -161,7 +233,7 @@ export default function AlarmsPage() {
             });
     };
 
-    // Fetch alarm statistics
+    // 🔧 FIXED: Fetch alarm statistics with proper data handling
     const fetchAlarmStats = () => {
         if (!projectId) return;
         console.log('📤 Fetching alarm stats...');
@@ -177,7 +249,7 @@ export default function AlarmsPage() {
             });
     };
 
-    // Fetch tags and devices
+    // 🔧 FIXED: Fetch tags and devices with better error handling
     const fetchTagsAndDevices = () => {
         if (!projectId) return;
         console.log('📤 Fetching tags and devices...');
@@ -186,17 +258,24 @@ export default function AlarmsPage() {
         axios.get(`/devices/project/${projectId}`)
             .then(res => {
                 console.log('✅ Devices fetched:', res.data);
-                setDevices(res.data);
+                const devicesData = Array.isArray(res.data) ? res.data : (res.data.devices || []);
+                setDevices(devicesData);
 
                 // Fetch tags for all devices
-                const tagPromises = res.data.map(device =>
+                const tagPromises = devicesData.map(device =>
                     axios.get(`/tags/device/${device.device_id}`)
-                        .then(response => response.data.map(tag => ({
-                            ...tag,
-                            device_name: device.device_name,
-                            device_type: device.device_type
-                        })))
-                        .catch(() => [])
+                        .then(response => {
+                            const tagsData = Array.isArray(response.data) ? response.data : (response.data.tags || []);
+                            return tagsData.map(tag => ({
+                                ...tag,
+                                device_name: device.device_name,
+                                device_type: device.device_type
+                            }));
+                        })
+                        .catch(err => {
+                            console.error(`❌ Failed to fetch tags for device ${device.device_id}:`, err);
+                            return [];
+                        })
                 );
 
                 return Promise.all(tagPromises);
@@ -243,23 +322,34 @@ export default function AlarmsPage() {
         }
     }, [alarmRuleChanges]);
 
-    // Real-time alarm event notifications
+    // 🔧 FIXED: Real-time alarm event notifications
     useEffect(() => {
         if (wsAlarmEvents?.length > 0) {
             const latestEvent = wsAlarmEvents[0];
             if (latestEvent.type === 'triggered') {
                 setSnackbar({
                     open: true,
-                    msg: `🚨 ALARM: ${latestEvent.rule?.rule_name}`,
+                    msg: `🚨 ALARM: ${latestEvent.rule_name}`,
                     severity: 'error'
                 });
                 // Auto-switch to active alarms tab
                 if (currentTab === 0) {
                     setCurrentTab(1);
                 }
+                // Refresh active alarms
+                fetchActiveAlarms();
             }
         }
     }, [wsAlarmEvents, currentTab]);
+
+    // 🔧 FIXED: Listen for real-time alarm summary updates
+    useEffect(() => {
+        if (Object.keys(wsAlarmSummary).length > 0) {
+            console.log('🔧 WebSocket alarm summary updated:', wsAlarmSummary);
+            // Refresh active alarms when summary changes
+            fetchActiveAlarms();
+        }
+    }, [wsAlarmSummary]);
 
     // Initial data loading
     useEffect(() => {
@@ -277,7 +367,7 @@ export default function AlarmsPage() {
         // Filter by search term
         if (search) {
             filteredRules = filteredRules.filter(rule =>
-                rule.rule_name.toLowerCase().includes(search.toLowerCase()) ||
+                rule.rule_name?.toLowerCase().includes(search.toLowerCase()) ||
                 (rule.tag_name && rule.tag_name.toLowerCase().includes(search.toLowerCase())) ||
                 (rule.device_name && rule.device_name.toLowerCase().includes(search.toLowerCase())) ||
                 (rule.severity && rule.severity.toLowerCase().includes(search.toLowerCase()))
@@ -292,9 +382,14 @@ export default function AlarmsPage() {
         setFiltered(filteredRules);
     }, [search, alarmRules, showEnabledOnly]);
 
-    // Check if alarm rule has active alarm
+    // 🔧 FIXED: Check if alarm rule has active alarm
     const isRuleActive = (ruleId) => {
-        return displayActiveAlarms?.some(alarm => alarm.rule_id === ruleId) || false;
+        const isActive = currentActiveAlarms?.some(alarm =>
+            alarm.rule_id === ruleId || alarm.id === ruleId
+        ) || false;
+
+        console.log(`🔧 Rule ${ruleId} active check:`, isActive);
+        return isActive;
     };
 
     // Get real-time alarm condition status
@@ -378,7 +473,10 @@ export default function AlarmsPage() {
 
         console.log('📤 Updating alarm rule...');
 
-        axios.put(`/alarms/project/${projectId}/rules/${current.rule_id}`, {
+        // 🔧 FIX: Use correct rule ID field
+        const ruleId = current.rule_id || current.id;
+
+        axios.put(`/alarms/project/${projectId}/rules/${ruleId}`, {
             rule_name: ruleName,
             threshold: parseFloat(threshold),
             condition_type: conditionType,
@@ -412,7 +510,10 @@ export default function AlarmsPage() {
 
         console.log('📤 Deleting alarm rule...');
 
-        axios.delete(`/alarms/project/${projectId}/rules/${current.rule_id}`)
+        // 🔧 FIX: Use correct rule ID field
+        const ruleId = current.rule_id || current.id;
+
+        axios.delete(`/alarms/project/${projectId}/rules/${ruleId}`)
             .then(() => {
                 console.log('✅ Alarm rule deleted successfully');
                 setDeleteOpen(false);
@@ -431,41 +532,70 @@ export default function AlarmsPage() {
             });
     };
 
-    // Enhanced acknowledge alarm with WebSocket support
+    // 🔧 FIXED: Enhanced acknowledge alarm with proper rule ID handling
     const handleAcknowledge = () => {
         if (!current) return;
 
-        console.log('📤 Acknowledging alarm...');
+        // 🔧 FIX: Use correct rule ID field
+        const ruleId = current.rule_id || current.id;
+        console.log('📤 Acknowledging alarm:', current.rule_name, 'Rule ID:', ruleId);
 
-        // Try WebSocket acknowledgment first if connected
-        if (isConnected && wsAcknowledgeAlarm) {
-            console.log('🔗 Using WebSocket acknowledgment');
-            wsAcknowledgeAlarm(current.rule_id, ackMessage || 'Acknowledged by operator');
-
-            setAckOpen(false);
-            setAckMessage('');
-            setSnackbar({ open: true, msg: 'Alarm acknowledged via real-time connection!', severity: 'success' });
-            return;
-        }
-
-        // Fallback to API acknowledgment
-        console.log('📡 Using API acknowledgment');
-        axios.put(`/alarms/project/${projectId}/active/${current.rule_id}/ack`, {
+        const ackPayload = {
             message: ackMessage || 'Acknowledged by operator'
-        })
-            .then(() => {
-                console.log('✅ Alarm acknowledged successfully');
+        };
+
+        // 🔧 FIX: Use the exact URL pattern that matches your routes
+        axios.put(`/alarms/project/${projectId}/active/${ruleId}/ack`, ackPayload)
+            .then((response) => {
+                console.log('✅ Alarm acknowledged successfully:', response.data);
+
+                // 🔧 IMMEDIATE FIX: Remove the acknowledged alarm from active alarms immediately
+                setActiveAlarms(prevAlarms => {
+                    const updatedAlarms = prevAlarms.filter(alarm => {
+                        const alarmRuleId = alarm.rule_id || alarm.id;
+                        return alarmRuleId !== ruleId;
+                    });
+                    console.log('🔧 Removed alarm from local state. Remaining alarms:', updatedAlarms.length);
+                    return updatedAlarms;
+                });
+
+                // Close dialog
                 setAckOpen(false);
                 setAckMessage('');
-                setSnackbar({ open: true, msg: 'Alarm acknowledged successfully!', severity: 'success' });
-                fetchActiveAlarms();
-                fetchAlarmEvents();
+
+                setSnackbar({
+                    open: true,
+                    msg: `✅ Alarm "${current.rule_name}" acknowledged successfully!`,
+                    severity: 'success'
+                });
+
+                // Refresh data after delay to sync with backend
+                setTimeout(() => {
+                    fetchActiveAlarms();
+                    fetchAlarmEvents();
+                    fetchAlarmStats();
+                    fetchAlarmRules();
+                }, 1000);
+
+                // 🔧 FIX: Try WebSocket acknowledgment as well if connected
+                if (isConnected && wsAcknowledgeAlarm) {
+                    console.log('🔗 Also sending WebSocket acknowledgment');
+                    try {
+                        wsAcknowledgeAlarm(ruleId, ackMessage || 'Acknowledged by operator');
+                    } catch (wsError) {
+                        console.log('⚠️ WebSocket acknowledgment failed:', wsError);
+                    }
+                }
+
             })
             .catch(err => {
                 console.error('❌ Failed to acknowledge alarm:', err);
+                console.error('❌ Error response:', err.response?.data);
+                console.error('❌ Error status:', err.response?.status);
+
                 setSnackbar({
                     open: true,
-                    msg: err.response?.data?.error || 'Failed to acknowledge alarm',
+                    msg: `❌ Failed to acknowledge alarm: ${err.response?.data?.details || err.response?.data?.error || err.message}`,
                     severity: 'error'
                 });
             });
@@ -499,7 +629,7 @@ export default function AlarmsPage() {
     };
 
     const getSeverityColor = (severity) => {
-        switch (severity) {
+        switch (severity?.toLowerCase()) {
             case 'critical': return 'error';
             case 'warning': return 'warning';
             case 'info': return 'info';
@@ -508,7 +638,7 @@ export default function AlarmsPage() {
     };
 
     const getSeverityIcon = (severity) => {
-        switch (severity) {
+        switch (severity?.toLowerCase()) {
             case 'critical': return ErrorIcon;
             case 'warning': return WarningIcon;
             case 'info': return InfoIcon;
@@ -517,7 +647,7 @@ export default function AlarmsPage() {
     };
 
     const getConditionTypeColor = (type) => {
-        switch (type) {
+        switch (type?.toLowerCase()) {
             case 'high': return 'error';
             case 'low': return 'warning';
             case 'change': return 'info';
@@ -535,7 +665,7 @@ export default function AlarmsPage() {
     };
 
     const formatEventType = (eventType) => {
-        switch (eventType) {
+        switch (eventType?.toLowerCase()) {
             case 'triggered': return { label: 'TRIGGERED', color: 'error', icon: WarningIcon };
             case 'acknowledged': return { label: 'ACKNOWLEDGED', color: 'warning', icon: CheckIcon };
             case 'cleared': return { label: 'CLEARED', color: 'success', icon: CheckCircleIcon };
@@ -547,7 +677,9 @@ export default function AlarmsPage() {
     return (
         <Box sx={{
             p: 4,
-            background: 'linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%)',
+            background: isDark
+                ? 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)'
+                : 'linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%)',
             minHeight: '100vh'
         }}>
             {/* Enhanced Header */}
@@ -563,7 +695,9 @@ export default function AlarmsPage() {
                     <Box>
                         <Typography variant="h3" sx={{
                             fontWeight: 800,
-                            background: 'linear-gradient(135deg, #1e293b 0%, #475569 100%)',
+                            background: isDark
+                                ? 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)'
+                                : 'linear-gradient(135deg, #1e293b 0%, #475569 100%)',
                             backgroundClip: 'text',
                             WebkitBackgroundClip: 'text',
                             color: 'transparent'
@@ -579,7 +713,10 @@ export default function AlarmsPage() {
                 {/* Status Cards */}
                 <Grid container spacing={2} sx={{ mb: 3 }}>
                     <Grid item xs={12} sm={6} md={3}>
-                        <Card sx={{ background: 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)', color: 'white' }}>
+                        <Card sx={{
+                            background: 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)',
+                            color: 'white'
+                        }}>
                             <CardContent sx={{ p: 2 }}>
                                 <Typography variant="h4" sx={{ fontWeight: 800 }}>
                                     {displayAlarmSummary?.rules?.total_rules || alarmRules.length}
@@ -591,10 +728,13 @@ export default function AlarmsPage() {
                         </Card>
                     </Grid>
                     <Grid item xs={12} sm={6} md={3}>
-                        <Card sx={{ background: 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)', color: 'white' }}>
+                        <Card sx={{
+                            background: 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)',
+                            color: 'white'
+                        }}>
                             <CardContent sx={{ p: 2 }}>
                                 <Typography variant="h4" sx={{ fontWeight: 800 }}>
-                                    {displayAlarmSummary?.active_alarms?.total_active || displayActiveAlarms.length}
+                                    {displayAlarmSummary?.active_alarms?.total_active || currentActiveAlarms.length}
                                 </Typography>
                                 <Typography variant="body2" sx={{ opacity: 0.9 }}>
                                     Active Alarms
@@ -603,10 +743,13 @@ export default function AlarmsPage() {
                         </Card>
                     </Grid>
                     <Grid item xs={12} sm={6} md={3}>
-                        <Card sx={{ background: 'linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%)', color: 'white' }}>
+                        <Card sx={{
+                            background: 'linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%)',
+                            color: 'white'
+                        }}>
                             <CardContent sx={{ p: 2 }}>
                                 <Typography variant="h4" sx={{ fontWeight: 800 }}>
-                                    {unacknowledgedAlarmCount || displayAlarmSummary?.active_alarms?.unacknowledged || 0}
+                                    {unacknowledgedAlarmCount || displayAlarmSummary?.active_alarms?.unacknowledged || currentActiveAlarms.length}
                                 </Typography>
                                 <Typography variant="body2" sx={{ opacity: 0.9 }}>
                                     Unacknowledged
@@ -615,7 +758,10 @@ export default function AlarmsPage() {
                         </Card>
                     </Grid>
                     <Grid item xs={12} sm={6} md={3}>
-                        <Card sx={{ background: 'linear-gradient(135deg, #10b981 0%, #34d399 100%)', color: 'white' }}>
+                        <Card sx={{
+                            background: 'linear-gradient(135deg, #10b981 0%, #34d399 100%)',
+                            color: 'white'
+                        }}>
                             <CardContent sx={{ p: 2 }}>
                                 <Typography variant="h4" sx={{ fontWeight: 800 }}>
                                     {measurementCount}
@@ -628,24 +774,62 @@ export default function AlarmsPage() {
                     </Grid>
                 </Grid>
 
-                {/* Controls */}
+                {/* UPDATED Controls with Sound Integration */}
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <Stack direction="row" spacing={2} alignItems="center">
+                    <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap">
                         <Chip
                             icon={isConnected ? <WifiIcon /> : <WifiOffIcon />}
                             label={isConnected ? 'Real-time Connected' : 'Offline Mode'}
                             color={isConnected ? 'success' : 'error'}
                             sx={{ fontWeight: 600 }}
                         />
+
                         {/* Real-time alarm indicator */}
-                        {isConnected && displayActiveAlarms.length > 0 && (
+                        {isConnected && currentActiveAlarms.length > 0 && (
                             <Chip
                                 icon={<NotificationsActiveIcon />}
-                                label={`${displayActiveAlarms.length} Live Alarms`}
+                                label={`${currentActiveAlarms.length} Live Alarms`}
                                 color="error"
                                 sx={{ fontWeight: 600, animation: hasCriticalAlarms ? 'pulse 2s infinite' : 'none' }}
                             />
                         )}
+
+                        {/* ALARM SOUND STATUS INDICATOR */}
+                        <Chip
+                            icon={soundEnabled ? <VolumeUpIcon /> : <VolumeOffIcon />}
+                            label={soundEnabled ? 'Sounds On' : 'Sounds Off'}
+                            color={soundEnabled ? 'success' : 'default'}
+                            sx={{
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                                '&:hover': {
+                                    background: soundEnabled ? 'rgba(16, 185, 129, 0.1)' : 'rgba(156, 163, 175, 0.1)'
+                                }
+                            }}
+                            onClick={() => {
+                                // Quick test sound
+                                if (soundEnabled) {
+                                    playTestSound('warning');
+                                }
+                            }}
+                        />
+
+                        {/* Show current playing alarm */}
+                        {currentAlarm && soundStatus === 'playing' && (
+                            <Chip
+                                icon={<VolumeUpIcon />}
+                                label={`🔊 ${currentAlarm.rule_name || 'Alarm Playing'}`}
+                                color="error"
+                                size="small"
+                                sx={{
+                                    fontWeight: 600,
+                                    animation: 'pulse 2s infinite'
+                                }}
+                                onDelete={stopAlarm}
+                                deleteIcon={<StopIcon />}
+                            />
+                        )}
+
                         {/* WebSocket data indicator */}
                         {wsActiveAlarms?.length > 0 && (
                             <Chip
@@ -655,6 +839,7 @@ export default function AlarmsPage() {
                                 sx={{ fontWeight: 600 }}
                             />
                         )}
+
                         <FormControlLabel
                             control={
                                 <Switch
@@ -668,6 +853,9 @@ export default function AlarmsPage() {
                     </Stack>
 
                     <Stack direction="row" spacing={2} alignItems="center">
+                        {/* ALARM SOUND CONTROLS */}
+                        <AlarmSoundControls variant="compact" />
+
                         <IconButton onClick={() => {
                             fetchAlarmRules();
                             fetchActiveAlarms();
@@ -680,7 +868,13 @@ export default function AlarmsPage() {
                             placeholder="Search alarms..."
                             variant="outlined"
                             size="small"
-                            sx={{ width: 300 }}
+                            sx={{
+                                width: 300,
+                                '& .MuiOutlinedInput-root': {
+                                    background: isDark ? 'rgba(30, 41, 59, 0.8)' : 'rgba(255,255,255,0.9)',
+                                    backdropFilter: 'blur(10px)'
+                                }
+                            }}
                             InputProps={{
                                 startAdornment: (
                                     <InputAdornment position="start">
@@ -696,7 +890,7 @@ export default function AlarmsPage() {
             </Box>
 
             {/* Active Alarms Alert - Enhanced with real-time data */}
-            {displayActiveAlarms?.length > 0 && (
+            {currentActiveAlarms?.length > 0 && (
                 <motion.div
                     initial={{ opacity: 0, y: -20 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -720,11 +914,11 @@ export default function AlarmsPage() {
                         }
                     >
                         <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                            {displayActiveAlarms.length} Active Alarm{displayActiveAlarms.length > 1 ? 's' : ''} -
+                            {currentActiveAlarms.length} Active Alarm{currentActiveAlarms.length > 1 ? 's' : ''} -
                             {hasCriticalAlarms ? ' CRITICAL ATTENTION REQUIRED' : ' Immediate Attention Required'}
                         </Typography>
                         <List dense>
-                            {displayActiveAlarms.slice(0, 3).map((alarm, index) => (
+                            {currentActiveAlarms.slice(0, 3).map((alarm, index) => (
                                 <ListItem key={index} sx={{ py: 0 }}>
                                     <Typography variant="body2">
                                         • {alarm.rule_name} - {alarm.severity?.toUpperCase()} - {alarm.tag_name}
@@ -732,10 +926,10 @@ export default function AlarmsPage() {
                                     </Typography>
                                 </ListItem>
                             ))}
-                            {displayActiveAlarms.length > 3 && (
+                            {currentActiveAlarms.length > 3 && (
                                 <ListItem sx={{ py: 0 }}>
                                     <Typography variant="body2" color="text.secondary">
-                                        ... and {displayActiveAlarms.length - 3} more alarms
+                                        ... and {currentActiveAlarms.length - 3} more alarms
                                     </Typography>
                                 </ListItem>
                             )}
@@ -745,7 +939,12 @@ export default function AlarmsPage() {
             )}
 
             {/* Tabs for different views */}
-            <Paper sx={{ mb: 3 }}>
+            <Paper sx={{
+                mb: 3,
+                background: isDark
+                    ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+            }}>
                 <Tabs
                     value={currentTab}
                     onChange={(e, newValue) => setCurrentTab(newValue)}
@@ -755,7 +954,7 @@ export default function AlarmsPage() {
                     <Tab label={`Alarm Rules (${alarmRules.length})`} icon={<SettingsIcon />} />
                     <Tab
                         label={
-                            <Badge badgeContent={displayActiveAlarms.length} color="error">
+                            <Badge badgeContent={currentActiveAlarms.length} color="error">
                                 Active Alarms
                             </Badge>
                         }
@@ -778,8 +977,10 @@ export default function AlarmsPage() {
                                 <Paper sx={{
                                     p: 6,
                                     textAlign: 'center',
-                                    background: 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
-                                    border: '2px dashed #cbd5e1'
+                                    background: isDark
+                                        ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                                        : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+                                    border: isDark ? '2px dashed #475569' : '2px dashed #cbd5e1'
                                 }}>
                                     <SettingsIcon sx={{ fontSize: 64, color: 'text.disabled', mb: 2 }} />
                                     <Typography variant="h5" gutterBottom sx={{ fontWeight: 600 }}>
@@ -799,6 +1000,7 @@ export default function AlarmsPage() {
                                                 resetForm();
                                                 setAddOpen(true);
                                             }}
+                                            sx={{ background: 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)' }}
                                         >
                                             Create First Alarm Rule
                                         </Button>
@@ -811,12 +1013,13 @@ export default function AlarmsPage() {
                     <AnimatePresence>
                         {filtered.map((rule, index) => {
                             const SeverityIcon = getSeverityIcon(rule.severity);
-                            const isActive = isRuleActive(rule.rule_id);
+                            const ruleId = rule.rule_id || rule.id;
+                            const isActive = isRuleActive(ruleId);
                             const DeviceIcon = getDeviceIcon(rule.device_type);
                             const alarmCondition = checkAlarmCondition(rule);
 
                             return (
-                                <Grid item xs={12} sm={6} lg={4} key={rule.rule_id}>
+                                <Grid item xs={12} sm={6} lg={4} key={ruleId}>
                                     <motion.div
                                         initial={{ opacity: 0, y: 20 }}
                                         animate={{ opacity: 1, y: 0 }}
@@ -828,22 +1031,30 @@ export default function AlarmsPage() {
                                         <Card sx={{
                                             height: '100%',
                                             background: isActive
-                                                ? 'linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%)'
+                                                ? isDark
+                                                    ? 'linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%)'
+                                                    : 'linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%)'
                                                 : !rule.enabled
-                                                    ? 'linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%)'
-                                                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+                                                    ? isDark
+                                                        ? 'linear-gradient(135deg, #374151 0%, #4b5563 100%)'
+                                                        : 'linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%)'
+                                                    : isDark
+                                                        ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                                                        : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
                                             border: isActive
                                                 ? '2px solid #dc2626'
                                                 : !rule.enabled
-                                                    ? '1px solid #d1d5db'
-                                                    : '1px solid #e2e8f0',
+                                                    ? isDark ? '1px solid #6b7280' : '1px solid #d1d5db'
+                                                    : isDark ? '1px solid #475569' : '1px solid #e2e8f0',
                                             cursor: 'pointer',
                                             transition: 'all 0.3s ease-in-out',
                                             position: 'relative',
                                             opacity: rule.enabled ? 1 : 0.7,
                                             '&:hover': {
                                                 borderColor: '#2563eb',
-                                                boxShadow: '0 20px 40px rgb(37 99 235 / 0.1)',
+                                                boxShadow: isDark
+                                                    ? '0 20px 40px rgba(37, 99, 235, 0.2)'
+                                                    : '0 20px 40px rgba(37, 99, 235, 0.1)',
                                                 '& .alarm-actions': {
                                                     opacity: 1,
                                                     transform: 'translateY(0)'
@@ -935,8 +1146,8 @@ export default function AlarmsPage() {
                                                     <Box sx={{
                                                         p: 2,
                                                         borderRadius: 2,
-                                                        background: '#f0fdf4',
-                                                        border: '1px solid #bbf7d0',
+                                                        background: isDark ? 'rgba(34, 197, 94, 0.1)' : '#f0fdf4',
+                                                        border: isDark ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid #bbf7d0',
                                                         mb: 2,
                                                         textAlign: 'center'
                                                     }}>
@@ -949,8 +1160,8 @@ export default function AlarmsPage() {
                                                     <Box sx={{
                                                         p: 2,
                                                         borderRadius: 2,
-                                                        background: '#f9fafb',
-                                                        border: '1px solid #d1d5db',
+                                                        background: isDark ? 'rgba(156, 163, 175, 0.1)' : '#f9fafb',
+                                                        border: isDark ? '1px solid rgba(156, 163, 175, 0.3)' : '1px solid #d1d5db',
                                                         mb: 2,
                                                         textAlign: 'center'
                                                     }}>
@@ -1024,9 +1235,9 @@ export default function AlarmsPage() {
                                                                     openEdit(rule);
                                                                 }}
                                                                 sx={{
-                                                                    bgcolor: 'primary.50',
+                                                                    bgcolor: isDark ? 'rgba(59, 130, 246, 0.1)' : 'primary.50',
                                                                     color: 'primary.main',
-                                                                    '&:hover': { bgcolor: 'primary.100' }
+                                                                    '&:hover': { bgcolor: isDark ? 'rgba(59, 130, 246, 0.2)' : 'primary.100' }
                                                                 }}
                                                             >
                                                                 <EditIcon fontSize="small" />
@@ -1041,12 +1252,31 @@ export default function AlarmsPage() {
                                                                     setDeleteOpen(true);
                                                                 }}
                                                                 sx={{
-                                                                    bgcolor: 'error.50',
+                                                                    bgcolor: isDark ? 'rgba(239, 68, 68, 0.1)' : 'error.50',
                                                                     color: 'error.main',
-                                                                    '&:hover': { bgcolor: 'error.100' }
+                                                                    '&:hover': { bgcolor: isDark ? 'rgba(239, 68, 68, 0.2)' : 'error.100' }
                                                                 }}
                                                             >
                                                                 <DeleteIcon fontSize="small" />
+                                                            </IconButton>
+                                                        </Tooltip>
+
+                                                        {/* TEST ALARM SOUND BUTTON */}
+                                                        <Tooltip title="Test Alarm Sound">
+                                                            <IconButton
+                                                                size="small"
+                                                                onClick={e => {
+                                                                    e.stopPropagation();
+                                                                    playTestSound(rule.severity || 'warning');
+                                                                }}
+                                                                sx={{
+                                                                    bgcolor: isDark ? 'rgba(14, 165, 233, 0.1)' : 'info.50',
+                                                                    color: 'info.main',
+                                                                    '&:hover': { bgcolor: isDark ? 'rgba(14, 165, 233, 0.2)' : 'info.100' }
+                                                                }}
+                                                                disabled={!soundEnabled}
+                                                            >
+                                                                <VolumeUpIcon fontSize="small" />
                                                             </IconButton>
                                                         </Tooltip>
                                                     </Box>
@@ -1060,9 +1290,9 @@ export default function AlarmsPage() {
                                                                     openAcknowledge(rule);
                                                                 }}
                                                                 sx={{
-                                                                    bgcolor: 'warning.50',
+                                                                    bgcolor: isDark ? 'rgba(245, 158, 11, 0.1)' : 'warning.50',
                                                                     color: 'warning.main',
-                                                                    '&:hover': { bgcolor: 'warning.100' }
+                                                                    '&:hover': { bgcolor: isDark ? 'rgba(245, 158, 11, 0.2)' : 'warning.100' }
                                                                 }}
                                                             >
                                                                 <CheckIcon fontSize="small" />
@@ -1082,12 +1312,14 @@ export default function AlarmsPage() {
 
             {/* Tab Panel 1: Active Alarms */}
             <TabPanel value={currentTab} index={1}>
-                {displayActiveAlarms.length === 0 ? (
+                {currentActiveAlarms.length === 0 ? (
                     <Paper sx={{
                         p: 6,
                         textAlign: 'center',
-                        background: 'linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)',
-                        border: '2px solid #bbf7d0'
+                        background: isDark
+                            ? 'linear-gradient(135deg, #064e3b 0%, #065f46 100%)'
+                            : 'linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)',
+                        border: isDark ? '2px solid #059669' : '2px solid #bbf7d0'
                     }}>
                         <CheckCircleIcon sx={{ fontSize: 64, color: 'success.main', mb: 2 }} />
                         <Typography variant="h5" gutterBottom sx={{ fontWeight: 600, color: 'success.main' }}>
@@ -1099,80 +1331,108 @@ export default function AlarmsPage() {
                     </Paper>
                 ) : (
                     <Grid container spacing={3}>
-                        {displayActiveAlarms.map((alarm, index) => (
-                            <Grid item xs={12} key={`${alarm.rule_id}-${index}`}>
-                                <motion.div
-                                    initial={{ opacity: 0, x: -20 }}
-                                    animate={{ opacity: 1, x: 0 }}
-                                    transition={{ delay: index * 0.1 }}
-                                >
-                                    <Card sx={{
-                                        background: 'linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%)',
-                                        border: '2px solid #dc2626',
-                                        animation: alarm.state === 'triggered' ? 'pulse 2s infinite' : 'none'
-                                    }}>
-                                        <CardContent sx={{ p: 3 }}>
-                                            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                                                <Box sx={{ flex: 1 }}>
-                                                    <Typography variant="h6" sx={{ fontWeight: 700, mb: 1, color: 'error.main' }}>
-                                                        🚨 {alarm.rule_name}
-                                                    </Typography>
-                                                    <Typography variant="body1" sx={{ mb: 2 }}>
-                                                        {alarm.tag_name} on {alarm.device_name}
-                                                    </Typography>
-                                                    <Stack direction="row" spacing={2} sx={{ mb: 2 }}>
-                                                        <Chip
-                                                            label={alarm.severity?.toUpperCase()}
-                                                            color={getSeverityColor(alarm.severity)}
-                                                            sx={{ fontWeight: 600 }}
-                                                        />
-                                                        <Chip
-                                                            label={alarm.state?.toUpperCase()}
-                                                            color={alarm.state === 'triggered' ? 'error' : 'warning'}
-                                                            sx={{ fontWeight: 600 }}
-                                                        />
-                                                        <Chip
-                                                            label={`Triggered: ${new Date(alarm.triggered_at).toLocaleString()}`}
-                                                            variant="outlined"
-                                                        />
-                                                    </Stack>
-                                                    <Typography variant="body2" color="text.secondary">
-                                                        Threshold: {alarm.threshold} | Current: {alarm.trigger_value}
-                                                    </Typography>
-                                                </Box>
-                                                <Box>
-                                                    {alarm.state === 'triggered' && (
+                        {currentActiveAlarms.map((alarm, index) => {
+                            const alarmRuleId = alarm.rule_id || alarm.id;
+                            return (
+                                <Grid item xs={12} key={`${alarmRuleId}-${index}`}>
+                                    <motion.div
+                                        initial={{ opacity: 0, x: -20 }}
+                                        animate={{ opacity: 1, x: 0 }}
+                                        transition={{ delay: index * 0.1 }}
+                                    >
+                                        <Card sx={{
+                                            background: isDark
+                                                ? 'linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%)'
+                                                : 'linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%)',
+                                            border: '2px solid #dc2626',
+                                            animation: alarm.state === 'triggered' ? 'pulse 2s infinite' : 'none'
+                                        }}>
+                                            <CardContent sx={{ p: 3 }}>
+                                                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                                                    <Box sx={{ flex: 1 }}>
+                                                        <Typography variant="h6" sx={{ fontWeight: 700, mb: 1, color: 'error.main' }}>
+                                                            🚨 {alarm.rule_name}
+                                                        </Typography>
+                                                        <Typography variant="body1" sx={{ mb: 2 }}>
+                                                            {alarm.tag_name} on {alarm.device_name}
+                                                        </Typography>
+                                                        <Stack direction="row" spacing={2} sx={{ mb: 2 }}>
+                                                            <Chip
+                                                                label={alarm.severity?.toUpperCase()}
+                                                                color={getSeverityColor(alarm.severity)}
+                                                                sx={{ fontWeight: 600 }}
+                                                            />
+                                                            <Chip
+                                                                label={alarm.state?.toUpperCase() || 'TRIGGERED'}
+                                                                color={alarm.state === 'triggered' ? 'error' : 'warning'}
+                                                                sx={{ fontWeight: 600 }}
+                                                            />
+                                                            <Chip
+                                                                label={`Triggered: ${new Date(alarm.triggered_at).toLocaleString()}`}
+                                                                variant="outlined"
+                                                            />
+                                                        </Stack>
+                                                        <Typography variant="body2" color="text.secondary">
+                                                            Threshold: {alarm.threshold} | Current: {alarm.trigger_value}
+                                                        </Typography>
+                                                    </Box>
+                                                    <Box>
+                                                        {/* MANUAL SOUND TRIGGER BUTTON */}
                                                         <Button
-                                                            variant="contained"
-                                                            color="warning"
-                                                            startIcon={<CheckIcon />}
-                                                            onClick={() => openAcknowledge(alarm)}
+                                                            variant="outlined"
+                                                            size="small"
+                                                            startIcon={<VolumeUpIcon />}
+                                                            onClick={() => {
+                                                                playAlarmSequence(alarm.severity || 'warning', {
+                                                                    rule_name: alarm.rule_name,
+                                                                    tag_name: alarm.tag_name,
+                                                                    device_name: alarm.device_name,
+                                                                    trigger_value: alarm.trigger_value
+                                                                });
+                                                            }}
                                                             sx={{ mr: 1 }}
+                                                            disabled={!soundEnabled}
                                                         >
-                                                            Acknowledge
+                                                            Play Sound
                                                         </Button>
-                                                    )}
-                                                    <Button
-                                                        variant="outlined"
-                                                        startIcon={<HistoryIcon />}
-                                                        onClick={() => setCurrentTab(2)}
-                                                    >
-                                                        View History
-                                                    </Button>
+
+                                                        {(alarm.state === 'triggered' || !alarm.acknowledged_at) && (
+                                                            <Button
+                                                                variant="contained"
+                                                                color="warning"
+                                                                startIcon={<CheckIcon />}
+                                                                onClick={() => openAcknowledge(alarm)}
+                                                                sx={{ mr: 1 }}
+                                                            >
+                                                                Acknowledge
+                                                            </Button>
+                                                        )}
+                                                        <Button
+                                                            variant="outlined"
+                                                            startIcon={<HistoryIcon />}
+                                                            onClick={() => setCurrentTab(2)}
+                                                        >
+                                                            View History
+                                                        </Button>
+                                                    </Box>
                                                 </Box>
-                                            </Box>
-                                        </CardContent>
-                                    </Card>
-                                </motion.div>
-                            </Grid>
-                        ))}
+                                            </CardContent>
+                                        </Card>
+                                    </motion.div>
+                                </Grid>
+                            );
+                        })}
                     </Grid>
                 )}
             </TabPanel>
 
             {/* Tab Panel 2: Event History */}
             <TabPanel value={currentTab} index={2}>
-                <TableContainer component={Paper}>
+                <TableContainer component={Paper} sx={{
+                    background: isDark
+                        ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                        : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                }}>
                     <Table>
                         <TableHead>
                             <TableRow>
@@ -1216,7 +1476,7 @@ export default function AlarmsPage() {
                                                 />
                                             </TableCell>
                                             <TableCell>
-                                                {event.trigger_value !== null ? event.trigger_value.toFixed(2) : '-'}
+                                                {event.trigger_value !== null && event.trigger_value !== undefined ? event.trigger_value.toFixed(2) : '-'}
                                             </TableCell>
                                             <TableCell>{event.message}</TableCell>
                                         </TableRow>
@@ -1243,7 +1503,11 @@ export default function AlarmsPage() {
                 {alarmStats ? (
                     <Grid container spacing={3}>
                         <Grid item xs={12} md={6}>
-                            <Card>
+                            <Card sx={{
+                                background: isDark
+                                    ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                            }}>
                                 <CardContent>
                                     <Typography variant="h6" gutterBottom>
                                         Alarm Rules Summary
@@ -1251,14 +1515,14 @@ export default function AlarmsPage() {
                                     <List>
                                         <ListItem>
                                             <ListItemText
-                                                primary={`Total Rules: ${alarmStats.rules.total_rules}`}
-                                                secondary={`Enabled: ${alarmStats.rules.enabled_rules} | Disabled: ${alarmStats.rules.disabled_rules}`}
+                                                primary={`Total Rules: ${alarmStats.rules?.total_rules || 0}`}
+                                                secondary={`Enabled: ${alarmStats.rules?.enabled_rules || 0} | Disabled: ${alarmStats.rules?.disabled_rules || 0}`}
                                             />
                                         </ListItem>
                                         <ListItem>
                                             <ListItemText
                                                 primary="By Severity"
-                                                secondary={`Critical: ${alarmStats.rules.critical_rules} | Warning: ${alarmStats.rules.warning_rules} | Info: ${alarmStats.rules.info_rules}`}
+                                                secondary={`Critical: ${alarmStats.rules?.critical_rules || 0} | Warning: ${alarmStats.rules?.warning_rules || 0} | Info: ${alarmStats.rules?.info_rules || 0}`}
                                             />
                                         </ListItem>
                                     </List>
@@ -1266,7 +1530,11 @@ export default function AlarmsPage() {
                             </Card>
                         </Grid>
                         <Grid item xs={12} md={6}>
-                            <Card>
+                            <Card sx={{
+                                background: isDark
+                                    ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                            }}>
                                 <CardContent>
                                     <Typography variant="h6" gutterBottom>
                                         Active Alarms Summary
@@ -1274,8 +1542,8 @@ export default function AlarmsPage() {
                                     <List>
                                         <ListItem>
                                             <ListItemText
-                                                primary={`Total Active: ${alarmStats.active_alarms.total_active}`}
-                                                secondary={`Unacknowledged: ${alarmStats.active_alarms.unacknowledged} | Acknowledged: ${alarmStats.active_alarms.acknowledged}`}
+                                                primary={`Total Active: ${alarmStats.active_alarms?.total_active || 0}`}
+                                                secondary={`Unacknowledged: ${alarmStats.active_alarms?.unacknowledged || 0} | Acknowledged: ${alarmStats.active_alarms?.acknowledged || 0}`}
                                             />
                                         </ListItem>
                                     </List>
@@ -1283,7 +1551,11 @@ export default function AlarmsPage() {
                             </Card>
                         </Grid>
                         <Grid item xs={12}>
-                            <Card>
+                            <Card sx={{
+                                background: isDark
+                                    ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                            }}>
                                 <CardContent>
                                     <Typography variant="h6" gutterBottom>
                                         24-Hour Activity
@@ -1291,8 +1563,8 @@ export default function AlarmsPage() {
                                     <List>
                                         <ListItem>
                                             <ListItemText
-                                                primary={`Total Events: ${alarmStats.events_24h.total_events_24h}`}
-                                                secondary={`Triggered: ${alarmStats.events_24h.triggered_24h} | Acknowledged: ${alarmStats.events_24h.acknowledged_24h} | Cleared: ${alarmStats.events_24h.cleared_24h}`}
+                                                primary={`Total Events: ${alarmStats.events_24h?.total_events_24h || 0}`}
+                                                secondary={`Triggered: ${alarmStats.events_24h?.triggered_24h || 0} | Acknowledged: ${alarmStats.events_24h?.acknowledged_24h || 0} | Cleared: ${alarmStats.events_24h?.cleared_24h || 0}`}
                                             />
                                         </ListItem>
                                     </List>
@@ -1301,7 +1573,13 @@ export default function AlarmsPage() {
                         </Grid>
                     </Grid>
                 ) : (
-                    <Paper sx={{ p: 3, textAlign: 'center' }}>
+                    <Paper sx={{
+                        p: 3,
+                        textAlign: 'center',
+                        background: isDark
+                            ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                            : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                    }}>
                         <Typography variant="body1" color="text.secondary">
                             Loading alarm statistics...
                         </Typography>
@@ -1342,7 +1620,9 @@ export default function AlarmsPage() {
                 PaperProps={{
                     sx: {
                         borderRadius: 4,
-                        background: 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                        background: isDark
+                            ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                            : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
                     }
                 }}
             >
@@ -1591,7 +1871,9 @@ export default function AlarmsPage() {
                 PaperProps={{
                     sx: {
                         borderRadius: 4,
-                        background: 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                        background: isDark
+                            ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                            : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
                     }
                 }}
             >
@@ -1701,7 +1983,9 @@ export default function AlarmsPage() {
             <Dialog open={deleteOpen} onClose={() => setDeleteOpen(false)} maxWidth="sm" PaperProps={{
                 sx: {
                     borderRadius: 4,
-                    background: 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                    background: isDark
+                        ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                        : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
                 }
             }}>
                 <DialogTitle>
@@ -1727,7 +2011,9 @@ export default function AlarmsPage() {
             <Dialog open={ackOpen} onClose={() => setAckOpen(false)} maxWidth="sm" PaperProps={{
                 sx: {
                     borderRadius: 4,
-                    background: 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                    background: isDark
+                        ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                        : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
                 }
             }}>
                 <DialogTitle>

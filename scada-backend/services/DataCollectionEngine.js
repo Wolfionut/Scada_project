@@ -1,4 +1,4 @@
-// services/DataCollectionEngine.js - FIXED: Use SimulationService for simulation, avoid duplication
+// services/DataCollectionEngine.js - COMPLETE FIXED VERSION with Proper Alarm Integration
 const pool = require('../db');
 const SimulationService = require('./protocols/SimulationService');
 const ModbusService = require('./protocols/ModbusService');
@@ -21,7 +21,7 @@ class DataCollectionEngine {
             activeTags: 0
         };
 
-        console.log('🏭 SCADA Data Collection Engine initialized - FIXED VERSION');
+        console.log('🏭 SCADA Data Collection Engine initialized - FIXED VERSION WITH ALARM INTEGRATION');
     }
 
     // ==================== MAIN ENGINE CONTROL ====================
@@ -43,7 +43,8 @@ class DataCollectionEngine {
                 this.scanAndStartCollectors();
             }, 30000);
 
-            console.log('✅ SCADA Data Collection Engine started successfully');
+            console.log('✅ 🏭 Data Collection Engine started successfully!');
+            console.log(`📊 Monitoring ${this.statistics.activeDevices} devices with ${this.statistics.activeTags} tags`);
             return {
                 success: true,
                 message: 'Data collection engine started',
@@ -175,14 +176,14 @@ class DataCollectionEngine {
             this.statistics.lastScan = new Date();
 
             const devicesQuery = `
-                SELECT 
+                SELECT
                     d.device_id, d.device_name, d.device_type, d.protocol,
                     d.ip_address, d.port, d.slave_id, d.project_id,
                     COUNT(t.tag_id) as tag_count
                 FROM devices d
-                LEFT JOIN tags t ON d.device_id = t.device_id
+                         LEFT JOIN tags t ON d.device_id = t.device_id
                 WHERE d.device_type IS NOT NULL
-                GROUP BY d.device_id, d.device_name, d.device_type, d.protocol, 
+                GROUP BY d.device_id, d.device_name, d.device_type, d.protocol,
                          d.ip_address, d.port, d.slave_id, d.project_id
                 HAVING COUNT(t.tag_id) > 0
                 ORDER BY d.device_name
@@ -254,7 +255,7 @@ class DataCollectionEngine {
         }
     }
 
-    // ==================== 🚀 FIXED SIMULATION COLLECTOR ====================
+    // ==================== 🚀 SIMULATION COLLECTOR ====================
 
     async startSimulationCollector(device, tags) {
         try {
@@ -273,7 +274,7 @@ class DataCollectionEngine {
                 }
             };
 
-            // 🚀 CRITICAL FIX: Use SimulationService instead of duplicate logic
+            // Use SimulationService instead of duplicate logic
             const result = await SimulationService.startSimulation(
                 device,
                 tags,
@@ -459,7 +460,7 @@ class DataCollectionEngine {
         }
     }
 
-    // ==================== DATA PROCESSING ====================
+    // ==================== 🔧 FIXED DATA PROCESSING WITH ALARM INTEGRATION ====================
 
     async processMeasurement(projectId, measurement) {
         try {
@@ -474,13 +475,14 @@ class DataCollectionEngine {
             const tag = tagResult.rows[0];
 
             if (!this.shouldStoreValue(tag, measurement.value)) {
+                console.log(`⚠️ DEBUG: Skipping storage due to deadband - Tag: ${measurement.tag_name}, Value: ${measurement.value}`);
                 return;
             }
 
             const insertQuery = `
                 INSERT INTO measurements (device_id, tag_id, value, timestamp, quality, source)
                 VALUES ($1, $2, $3, $4, $5, $6)
-                RETURNING *
+                    RETURNING *
             `;
 
             const values = [
@@ -492,10 +494,33 @@ class DataCollectionEngine {
                 measurement.source || 'simulation'
             ];
 
+            // 🐛 DEBUG: Log before database insert
+            console.log('🐛 DEBUG: About to insert measurement:', {
+                device_id: measurement.device_id,
+                tag_id: measurement.tag_id,
+                tag_name: measurement.tag_name,
+                value: measurement.value,
+                quality: measurement.quality || 'good',
+                quality_type: typeof (measurement.quality || 'good')
+            });
+
             const result = await pool.query(insertQuery, values);
             const storedMeasurement = result.rows[0];
 
+            console.log('✅ SUCCESS: Measurement stored with ID:', storedMeasurement.measurement_id);
+
             this.tagLastValues.set(measurement.tag_id, measurement.value);
+
+            // 🐛 DEBUG: Check WebSocket manager status
+            console.log('🐛 DEBUG WebSocket Status:', {
+                projectId: projectId,
+                tag_name: measurement.tag_name,
+                value: measurement.value,
+                wsManager_exists: !!this.wsManager,
+                wsManager_clients: this.wsManager ? this.wsManager.clients.size : 0,
+                wsManager_subscriptions: this.wsManager ? this.wsManager.projectSubscriptions.size : 0,
+                project_has_subscribers: this.wsManager ? this.wsManager.projectSubscriptions.has(projectId) : false
+            });
 
             // 🚀 Enhanced WebSocket broadcasting
             if (this.wsManager) {
@@ -516,10 +541,28 @@ class DataCollectionEngine {
                     timestamp: new Date().toISOString()
                 };
 
-                this.wsManager.broadcastToProject(projectId, broadcastData);
-                console.log(`📡 WebSocket broadcast: ${measurement.tag_name} = ${measurement.value}`);
+                // 🐛 DEBUG: Log broadcast data
+                console.log('🐛 DEBUG: Broadcasting data:', {
+                    type: broadcastData.type,
+                    projectId: broadcastData.projectId,
+                    tag_name: broadcastData.data.tag_name,
+                    value: broadcastData.data.value
+                });
+
+                const sentCount = this.wsManager.broadcastToProject(projectId, broadcastData);
+
+                if (sentCount > 0) {
+                    console.log(`📡 WebSocket broadcast: ${measurement.tag_name} = ${measurement.value}`);
+                    console.log(`📤 Broadcasted measurement to ${sentCount} clients for project ${projectId}`);
+                } else {
+                    console.log(`⚠️ WebSocket broadcast sent to 0 clients - No subscribers for project ${projectId}`);
+                }
+            } else {
+                console.log('❌ DEBUG: No WebSocket manager available for broadcasting!');
+                console.log('❌ This means wsManager was not passed to DataCollectionEngine constructor');
             }
 
+            // 🚨 CRITICAL: Check alarms AFTER storing measurement
             await this.checkAlarms(projectId, tag, measurement.value);
 
             this.statistics.totalReadings++;
@@ -527,7 +570,267 @@ class DataCollectionEngine {
 
         } catch (error) {
             console.error('❌ Error processing measurement:', error);
+            console.error('❌ Error details:', {
+                message: error.message,
+                code: error.code,
+                detail: error.detail
+            });
             this.statistics.failedReadings++;
+        }
+    }
+
+    // ==================== 🔧 FIXED ALARM SYSTEM ====================
+
+    async checkAlarms(projectId, tag, value) {
+        try {
+            console.log(`🔍 Checking alarms for tag ${tag.tag_name} = ${value}`);
+
+            const alarmRulesQuery = `
+                SELECT r.*, 
+                       COALESCE(t.tag_name, 'Unknown') as tag_name,
+                       COALESCE(d.device_name, 'Unknown') as device_name
+                FROM alarm_rules r
+                LEFT JOIN tags t ON r.tag_id = t.tag_id
+                LEFT JOIN devices d ON r.device_id = d.device_id
+                WHERE r.tag_id = $1 AND r.enabled = true
+            `;
+            const rulesResult = await pool.query(alarmRulesQuery, [tag.tag_id]);
+
+            console.log(`🔍 Found ${rulesResult.rows.length} alarm rules for tag ${tag.tag_name}`);
+
+            for (const rule of rulesResult.rows) {
+                const isAlarmCondition = this.evaluateAlarmCondition(rule, value);
+
+                console.log(`🔍 Rule "${rule.rule_name}": ${value} ${rule.condition_type} ${rule.threshold} = ${isAlarmCondition ? 'ALARM' : 'NORMAL'}`);
+
+                // Check current alarm state
+                const stateQuery = `SELECT * FROM alarm_states WHERE rule_id = $1`;
+                const stateResult = await pool.query(stateQuery, [rule.id]);
+                const currentState = stateResult.rows[0];
+
+                const isCurrentlyTriggered = currentState && currentState.state === 'triggered';
+                const isCurrentlyAcknowledged = currentState && currentState.state === 'acknowledged';
+
+                if (isAlarmCondition && !isCurrentlyTriggered && !isCurrentlyAcknowledged) {
+                    // NEW ALARM - Trigger it
+                    console.log(`🚨 NEW ALARM CONDITION: ${rule.rule_name}`);
+                    await this.triggerAlarm(projectId, rule, { ...tag, device_name: rule.device_name }, value);
+
+                } else if (!isAlarmCondition && (isCurrentlyTriggered || isCurrentlyAcknowledged)) {
+                    // CONDITION CLEARED - Clear the alarm
+                    console.log(`✅ ALARM CONDITION CLEARED: ${rule.rule_name}`);
+                    await this.clearAlarm(projectId, rule, { ...tag, device_name: rule.device_name }, value);
+
+                } else if (isAlarmCondition && isCurrentlyAcknowledged) {
+                    // ACKNOWLEDGED ALARM STILL IN ALARM STATE - Keep acknowledged but update value
+                    console.log(`⚠️ Acknowledged alarm still in alarm condition: ${rule.rule_name}`);
+                    await pool.query(`
+                        UPDATE alarm_states 
+                        SET trigger_value = $1, triggered_at = NOW()
+                        WHERE rule_id = $2
+                    `, [value, rule.id]);
+
+                } else {
+                    // NORMAL CONDITION OR ALREADY TRIGGERED - No action needed
+                    console.log(`ℹ️ No alarm action needed for ${rule.rule_name}: condition=${isAlarmCondition}, triggered=${isCurrentlyTriggered}, acked=${isCurrentlyAcknowledged}`);
+                }
+            }
+
+        } catch (error) {
+            console.error('❌ Error checking alarms:', error);
+        }
+    }
+
+    // 🔧 FIXED: Enhanced alarm condition evaluation
+    evaluateAlarmCondition(rule, value) {
+        const threshold = parseFloat(rule.threshold);
+        const deadband = parseFloat(rule.deadband) || 0;
+
+        switch (rule.condition_type?.toLowerCase()) {
+            case 'high':
+                return value > (threshold + deadband);
+            case 'low':
+                return value < (threshold - deadband);
+            case 'high_high':
+                return value > (threshold * 1.1 + deadband);
+            case 'low_low':
+                return value < (threshold * 0.9 - deadband);
+            case 'change':
+                // For change detection, compare against threshold with deadband
+                return Math.abs(value - threshold) > deadband;
+            default:
+                console.log(`⚠️ Unknown condition type: ${rule.condition_type}`);
+                return false;
+        }
+    }
+
+    // 🔧 FIXED: Trigger alarm with proper state management
+    async triggerAlarm(projectId, rule, tag, value) {
+        try {
+            console.log(`🚨 TRIGGERING ALARM: ${rule.rule_name} - ${tag.tag_name} = ${value}`);
+
+            // 🔧 CRITICAL FIX: Create alarm state first (this is what shows in Active Alarms)
+            const stateQuery = `
+                INSERT INTO alarm_states (
+                    rule_id, tag_id, device_id, project_id,
+                    state, trigger_value, triggered_at
+                ) VALUES ($1, $2, $3, $4, 'triggered', $5, NOW())
+                ON CONFLICT (rule_id) 
+                DO UPDATE SET 
+                    state = 'triggered',
+                    trigger_value = $5,
+                    triggered_at = NOW(),
+                    acknowledged_at = NULL,
+                    acknowledged_by = NULL,
+                    ack_message = NULL
+                RETURNING *
+            `;
+
+            const stateResult = await pool.query(stateQuery, [
+                rule.id, rule.tag_id, rule.device_id, projectId, value
+            ]);
+
+            console.log('✅ Alarm state created:', stateResult.rows[0]);
+
+            // 🔧 CRITICAL FIX: Create alarm event (this goes in history)
+            const eventQuery = `
+                INSERT INTO alarm_events (
+                    rule_id, tag_id, device_id, project_id, user_id,
+                    event_type, trigger_value, threshold_value, condition_type,
+                    severity, message, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+                RETURNING *
+            `;
+
+            const eventValues = [
+                rule.id, rule.tag_id, rule.device_id, projectId, rule.user_id,
+                'triggered', value, rule.threshold, rule.condition_type,
+                rule.severity, rule.message || `${rule.rule_name}: ${value} ${rule.condition_type} ${rule.threshold}`
+            ];
+
+            const eventResult = await pool.query(eventQuery, eventValues);
+            console.log('✅ Alarm event created:', eventResult.rows[0]);
+
+            // 🔧 Enhanced WebSocket notification for alarms
+            if (this.wsManager) {
+                this.wsManager.broadcastToProject(projectId, {
+                    type: 'alarm_triggered',
+                    data: {
+                        rule_id: rule.id,
+                        rule_name: rule.rule_name,
+                        tag_name: tag.tag_name,
+                        device_name: tag.device_name || 'Unknown Device',
+                        value: value,
+                        threshold: rule.threshold,
+                        condition_type: rule.condition_type,
+                        severity: rule.severity,
+                        message: rule.message || `${rule.rule_name}: ${value} ${rule.condition_type} ${rule.threshold}`,
+                        triggered_at: new Date().toISOString()
+                    }
+                });
+
+                // Also broadcast updated alarm summary
+                await this.broadcastAlarmSummary(projectId);
+            }
+
+            console.log(`🚨 ALARM TRIGGERED: ${rule.rule_name} - ${tag.tag_name} = ${value} (${rule.condition_type} ${rule.threshold})`);
+
+        } catch (error) {
+            console.error('❌ Error triggering alarm:', error);
+            console.error('❌ Error details:', error.message);
+        }
+    }
+
+    // 🔧 FIXED: Clear alarm with proper state management
+    async clearAlarm(projectId, rule, tag, value) {
+        try {
+            console.log(`✅ CLEARING ALARM: ${rule.rule_name} - ${tag.tag_name} = ${value}`);
+
+            // 🔧 CRITICAL FIX: Remove from alarm_states (clears from Active Alarms)
+            const deleteStateQuery = `DELETE FROM alarm_states WHERE rule_id = $1 RETURNING *`;
+            const deleteResult = await pool.query(deleteStateQuery, [rule.id]);
+
+            if (deleteResult.rows.length > 0) {
+                console.log('✅ Alarm state cleared:', deleteResult.rows[0]);
+            }
+
+            // Create cleared event for history
+            const eventQuery = `
+                INSERT INTO alarm_events (
+                    rule_id, tag_id, device_id, project_id, user_id,
+                    event_type, trigger_value, threshold_value, condition_type,
+                    severity, message, cleared_at, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+                RETURNING *
+            `;
+
+            const eventValues = [
+                rule.id, rule.tag_id, rule.device_id, projectId, rule.user_id,
+                'cleared', value, rule.threshold, rule.condition_type,
+                rule.severity, `${rule.rule_name}: CLEARED - ${value} (condition no longer met)`
+            ];
+
+            const eventResult = await pool.query(eventQuery, eventValues);
+            console.log('✅ Alarm cleared event created:', eventResult.rows[0]);
+
+            // Enhanced WebSocket notification
+            if (this.wsManager) {
+                this.wsManager.broadcastToProject(projectId, {
+                    type: 'alarm_cleared',
+                    data: {
+                        rule_id: rule.id,
+                        rule_name: rule.rule_name,
+                        tag_name: tag.tag_name,
+                        value: value,
+                        threshold: rule.threshold,
+                        cleared_at: new Date().toISOString()
+                    }
+                });
+
+                // Also broadcast updated alarm summary
+                await this.broadcastAlarmSummary(projectId);
+            }
+
+            console.log(`✅ ALARM CLEARED: ${rule.rule_name} - ${tag.tag_name} = ${value}`);
+
+        } catch (error) {
+            console.error('❌ Error clearing alarm:', error);
+        }
+    }
+
+    // 🔧 NEW: Broadcast alarm summary for real-time updates
+    async broadcastAlarmSummary(projectId) {
+        try {
+            // Get current alarm summary
+            const summaryQuery = `
+                SELECT 
+                    COUNT(*) as total_active,
+                    COUNT(CASE WHEN acknowledged_at IS NULL THEN 1 END) as unacknowledged,
+                    COUNT(CASE WHEN acknowledged_at IS NOT NULL THEN 1 END) as acknowledged
+                FROM alarm_states s
+                JOIN alarm_rules r ON s.rule_id = r.id
+                WHERE s.project_id = $1
+            `;
+
+            const summaryResult = await pool.query(summaryQuery, [projectId]);
+            const summary = summaryResult.rows[0];
+
+            if (this.wsManager) {
+                this.wsManager.broadcastToProject(projectId, {
+                    type: 'alarm_summary',
+                    data: {
+                        total_active: parseInt(summary.total_active),
+                        unacknowledged: parseInt(summary.unacknowledged),
+                        acknowledged: parseInt(summary.acknowledged),
+                        has_active_alarms: parseInt(summary.total_active) > 0,
+                        has_unacknowledged: parseInt(summary.unacknowledged) > 0,
+                        timestamp: new Date().toISOString()
+                    }
+                });
+            }
+
+        } catch (error) {
+            console.error('❌ Error broadcasting alarm summary:', error);
         }
     }
 
@@ -570,7 +873,7 @@ class DataCollectionEngine {
         try {
             switch (collector.type) {
                 case 'simulation':
-                    // 🚀 CRITICAL FIX: Use SimulationService to stop
+                    // Use SimulationService to stop
                     console.log(`🛑 Stopping simulation via SimulationService for device ${deviceId}`);
                     const stopResult = await SimulationService.stopSimulation(deviceId);
                     console.log(`🛑 Stop result:`, stopResult);
@@ -618,127 +921,79 @@ class DataCollectionEngine {
         this.deviceCollectors.delete(collectorKey);
     }
 
-    // ==================== ALARM CHECKING ====================
+    // ==================== 🧪 TESTING AND DEBUG METHODS ====================
 
-    async checkAlarms(projectId, tag, value) {
+    // Add this method to test alarm creation manually
+    async testAlarmCreation(projectId, ruleId, testValue) {
         try {
-            const alarmRulesQuery = `
-                SELECT * FROM alarm_rules
-                WHERE tag_id = $1 AND enabled = true
+            console.log(`🧪 TESTING ALARM CREATION: Rule ${ruleId}, Value ${testValue}`);
+
+            // Get the rule and associated tag
+            const ruleQuery = `
+                SELECT r.*, t.tag_name, d.device_name
+                FROM alarm_rules r
+                JOIN tags t ON r.tag_id = t.tag_id
+                JOIN devices d ON r.device_id = d.device_id
+                WHERE r.id = $1 AND r.project_id = $2
             `;
-            const rulesResult = await pool.query(alarmRulesQuery, [tag.tag_id]);
 
-            for (const rule of rulesResult.rows) {
-                const isAlarmCondition = this.evaluateAlarmCondition(rule, value);
+            const ruleResult = await pool.query(ruleQuery, [ruleId, projectId]);
 
-                const stateQuery = `SELECT * FROM alarm_states WHERE rule_id = $1`;
-                const stateResult = await pool.query(stateQuery, [rule.id]);
-
-                const currentState = stateResult.rows[0];
-                const wasTriggered = currentState && currentState.state === 'triggered';
-
-                if (isAlarmCondition && !wasTriggered) {
-                    await this.triggerAlarm(projectId, rule, tag, value);
-                } else if (!isAlarmCondition && wasTriggered) {
-                    await this.clearAlarm(projectId, rule, tag, value);
-                }
+            if (ruleResult.rows.length === 0) {
+                throw new Error(`Alarm rule ${ruleId} not found for project ${projectId}`);
             }
 
+            const rule = ruleResult.rows[0];
+            const tag = { tag_id: rule.tag_id, tag_name: rule.tag_name, device_name: rule.device_name };
+
+            // Force trigger the alarm
+            await this.triggerAlarm(projectId, rule, tag, testValue);
+
+            return {
+                success: true,
+                message: `Test alarm created for rule ${rule.rule_name}`,
+                rule_name: rule.rule_name,
+                test_value: testValue
+            };
+
         } catch (error) {
-            console.error('❌ Error checking alarms:', error);
+            console.error('❌ Test alarm creation failed:', error);
+            return {
+                success: false,
+                message: error.message
+            };
         }
     }
 
-    evaluateAlarmCondition(rule, value) {
-        switch (rule.condition_type) {
-            case 'high':
-                return value > rule.threshold;
-            case 'low':
-                return value < rule.threshold;
-            case 'high_high':
-                return value > (rule.threshold * 1.1);
-            case 'low_low':
-                return value < (rule.threshold * 0.9);
-            default:
-                return false;
-        }
-    }
-
-    async triggerAlarm(projectId, rule, tag, value) {
+    // Add this method to debug alarm states
+    async debugAlarmStates(projectId) {
         try {
-            const eventQuery = `
-                INSERT INTO alarm_events (
-                    rule_id, tag_id, device_id, project_id, user_id,
-                    event_type, trigger_value, threshold_value, condition_type,
-                    severity, message
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                    RETURNING *
+            const query = `
+                SELECT 
+                    s.*,
+                    r.rule_name,
+                    t.tag_name,
+                    d.device_name
+                FROM alarm_states s
+                JOIN alarm_rules r ON s.rule_id = r.id
+                JOIN tags t ON s.tag_id = t.tag_id
+                JOIN devices d ON s.device_id = d.device_id
+                WHERE s.project_id = $1
+                ORDER BY s.triggered_at DESC
             `;
 
-            const eventValues = [
-                rule.id, rule.tag_id, rule.device_id, projectId, rule.user_id,
-                'triggered', value, rule.threshold, rule.condition_type,
-                rule.severity, rule.message
-            ];
+            const result = await pool.query(query, [projectId]);
 
-            await pool.query(eventQuery, eventValues);
+            console.log(`🔍 DEBUG: Found ${result.rows.length} alarm states for project ${projectId}`);
+            result.rows.forEach(state => {
+                console.log(`   - ${state.rule_name}: ${state.state} (value: ${state.trigger_value})`);
+            });
 
-            if (this.wsManager) {
-                this.wsManager.broadcastToProject(projectId, {
-                    type: 'alarm_triggered',
-                    data: {
-                        rule_name: rule.rule_name,
-                        tag_name: tag.tag_name,
-                        value: value,
-                        threshold: rule.threshold,
-                        severity: rule.severity,
-                        message: rule.message
-                    }
-                });
-            }
-
-            console.log(`🚨 ALARM TRIGGERED: ${rule.rule_name} - ${tag.tag_name} = ${value}`);
+            return result.rows;
 
         } catch (error) {
-            console.error('❌ Error triggering alarm:', error);
-        }
-    }
-
-    async clearAlarm(projectId, rule, tag, value) {
-        try {
-            const eventQuery = `
-                INSERT INTO alarm_events (
-                    rule_id, tag_id, device_id, project_id, user_id,
-                    event_type, trigger_value, threshold_value, condition_type,
-                    severity, message
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                    RETURNING *
-            `;
-
-            const eventValues = [
-                rule.id, rule.tag_id, rule.device_id, projectId, rule.user_id,
-                'cleared', value, rule.threshold, rule.condition_type,
-                rule.severity, `${rule.message} - CLEARED`
-            ];
-
-            await pool.query(eventQuery, eventValues);
-
-            if (this.wsManager) {
-                this.wsManager.broadcastToProject(projectId, {
-                    type: 'alarm_cleared',
-                    data: {
-                        rule_name: rule.rule_name,
-                        tag_name: tag.tag_name,
-                        value: value,
-                        threshold: rule.threshold
-                    }
-                });
-            }
-
-            console.log(`✅ ALARM CLEARED: ${rule.rule_name} - ${tag.tag_name} = ${value}`);
-
-        } catch (error) {
-            console.error('❌ Error clearing alarm:', error);
+            console.error('❌ Error debugging alarm states:', error);
+            return [];
         }
     }
 
@@ -801,7 +1056,7 @@ class DataCollectionEngine {
             engine: this.getStatistics(),
             devices: this.getDeviceStatus(),
             available: true,
-            version: '1.0.0-fixed',
+            version: '1.0.0-alarm-integrated',
             timestamp: new Date().toISOString()
         };
     }

@@ -158,6 +158,11 @@ const createTagForProject = async (req, res) => {
         const result = await client.query(insertQuery, values);
         const newTag = result.rows[0];
 
+        if (newTag.simulation) {
+            console.log('🎯 Tag is simulation - generating initial measurement...');
+            await generateInitialSimulationMeasurement(newTag, device_id, projectId);
+        }
+
         console.log('✅ Tag created successfully:', newTag.tag_name);
 
         // Send WebSocket notification
@@ -267,6 +272,84 @@ const getTagsByProject = async (req, res) => {
         });
     } finally {
         client.release();
+    }
+};
+
+const generateInitialSimulationMeasurement = async (tag, deviceId, projectId) => {
+    try {
+        console.log('🎯 Generating initial simulation measurement for tag:', tag.tag_name);
+
+        // Generate initial value based on simulation pattern
+        let initialValue = 0;
+        const min = tag.simulation_min || 0;
+        const max = tag.simulation_max || 100;
+        const pattern = tag.simulation_pattern || 'random';
+
+        switch (pattern) {
+            case 'temperature':
+                initialValue = 25 + (Math.random() * 30 - 15); // 10-40°C
+                break;
+            case 'pressure':
+                initialValue = 100 + (Math.random() * 40 - 20); // 80-120 bar
+                break;
+            case 'level':
+                initialValue = 50 + (Math.random() * 30 - 15); // 35-65%
+                break;
+            case 'motor_rpm':
+                initialValue = 1450 + (Math.random() * 100 - 50); // 1400-1500 RPM
+                break;
+            case 'vibration':
+                initialValue = 2.5 + (Math.random() * 1); // 2.5-3.5 mm/s
+                break;
+            case 'flow':
+                initialValue = 50 + (Math.random() * 40 - 20); // 30-70 L/min
+                break;
+            case 'sine':
+                initialValue = min + (max - min) * (Math.sin(Date.now() / 1000) + 1) / 2;
+                break;
+            case 'random':
+            default:
+                initialValue = min + Math.random() * (max - min);
+                break;
+        }
+
+        // Ensure value is within bounds
+        initialValue = Math.max(min, Math.min(max, initialValue));
+
+        // Insert initial measurement
+        const measurementQuery = `
+            INSERT INTO measurements (device_id, tag_id, value, timestamp, quality, source)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING *
+        `;
+
+        const measurementResult = await pool.query(measurementQuery, [
+            deviceId,
+            tag.tag_id,
+            initialValue,
+            new Date(),
+            'good',
+            'simulation'
+        ]);
+
+        const measurement = measurementResult.rows[0];
+        console.log('✅ Initial measurement created:', measurement.measurement_id, 'value:', initialValue);
+
+        // Broadcast initial measurement via WebSocket
+        if (global.wsManager) {
+            global.wsManager.broadcastMeasurement(projectId, {
+                ...measurement,
+                tag_name: tag.tag_name,
+                device_name: 'Simulation Device'
+            });
+            console.log('📡 Initial measurement broadcasted via WebSocket');
+        }
+
+        return measurement;
+
+    } catch (error) {
+        console.error('❌ Failed to generate initial simulation measurement:', error);
+        // Don't throw - this is a nice-to-have feature
     }
 };
 
@@ -1134,72 +1217,34 @@ console.log('✅ TagController: Complete enhanced independent approach with data
 // MODULE EXPORTS
 // ==============================================================================
 
+// Debug Steps to Fix 404 Routes Issue
+
+// 1. Check your tagController.js exports
+// Make sure your module.exports at the end includes getTagsByProject:
+
 module.exports = {
-    // ==============================================================================
     // PRIMARY INDEPENDENT APPROACH FUNCTIONS (Project-level)
-    // ==============================================================================
     createTagForProject,
-    getTagsByProject,
-    getDevicesForProject,
+    getTagsByProject,        // ← MAKE SURE THIS IS HERE
+    getDevicesForProject,    // ← AND THIS
     updateTagForProject,
     deleteTagForProject,
     getProjectTagStats,
 
-    // ==============================================================================
-    // ENHANCED FUNCTIONS (Using Database Improvements)
-    // ==============================================================================
+    // Other functions...
+    getTagStatistics,
+    getLatestMeasurements,
+    getTagHealth,
+    getTagHistory,
+    getDeviceTagsWithStats,
 
-    // Statistics and Analytics
-    getTagStatistics,           // Uses tag_statistics view
-    getLatestMeasurements,      // Uses latest_measurements view
-    getTagHealth,               // Uses get_tag_health() function
-    getTagHistory,              // Uses optimized indexes for time-series
-    getDeviceTagsWithStats,     // Enhanced device endpoint with statistics
-
-    // ==============================================================================
-    // LEGACY COMPATIBILITY FUNCTIONS (Device-centric)
-    // ==============================================================================
-
-    // Basic legacy functions
-    createTag,                  // Redirects to project-level creation
-    getTagsByDevice,            // Filters project tags by device
-    updateTag,                  // Alias for updateTagForProject
-    deleteTag,                  // Alias for deleteTagForProject
-    getTagStats,                // Legacy device stats (deprecated)
-
-    // ==============================================================================
-    // BULK OPERATIONS (Future Implementation)
-    // ==============================================================================
-    bulkCreateTags,             // Not implemented yet
-    exportTags,                 // Not implemented yet
-    importTags,                 // Not implemented yet
-
-    // ==============================================================================
-    // FUNCTION MAPPING REFERENCE
-    // ==============================================================================
-    /*
-    Function Usage Guide:
-
-    PRIMARY FUNCTIONS (Use these in your React frontend):
-    - getTagsByProject          → Get all tags for a project
-    - createTagForProject       → Create new tag (requires device_id in body)
-    - updateTagForProject       → Update existing tag
-    - deleteTagForProject       → Delete tag
-    - getTagStatistics          → Get enhanced statistics (uses database view)
-    - getLatestMeasurements     → Get real-time values (uses database view)
-    - getTagHealth              → Get tag health status (uses database function)
-    - getTagHistory             → Get historical data (optimized queries)
-
-    LEGACY FUNCTIONS (For backward compatibility):
-    - getTagsByDevice           → Filters project tags by device
-    - createTag                 → Redirects to project creation
-    - updateTag                 → Same as updateTagForProject
-    - deleteTag                 → Same as deleteTagForProject
-
-    RECOMMENDED API ENDPOINTS FOR FRONTEND:
-    - GET /api/tags/project/:projectId/statistics
-    - GET /api/tags/project/:projectId/latest
-    - GET /api/tags/project/:projectId/:tagId/health
-    - GET /api/tags/project/:projectId/:tagId/history
-    */
+    // Legacy functions
+    createTag,
+    getTagsByDevice,
+    updateTag,
+    deleteTag,
+    getTagStats,
+    bulkCreateTags,
+    exportTags,
+    importTags
 };

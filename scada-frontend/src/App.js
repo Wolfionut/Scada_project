@@ -1,9 +1,10 @@
-// src/App.js - RESTORED ORIGINAL STRUCTURE
+// src/App.js - MODIFIED WITH ALARM SOUND SYSTEM
 import React from "react";
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from "react-router-dom";
 import { ThemeProvider as MuiThemeProvider, CssBaseline } from "@mui/material";
 import { AuthProvider } from "./context/AuthContext";
 import { ThemeProvider } from "./context/ThemeContext";
+import { AlarmSoundProvider } from "./context/AlarmSoundContext"; // ADD THIS
 import { createAppTheme } from "./theme";
 import { useTheme } from "./context/ThemeContext";
 import WelcomePage from "./pages/WelcomePage";
@@ -18,6 +19,7 @@ import MeasurementsPage from "./pages/MeasurementsPage";
 import DiagramEditorPage from "./pages/DiagramEditorPage";
 import ProtectedRoute from "./components/ProtectedRoute";
 import Sidebar from "./components/Sidebar";
+import { GlobalAlarmSoundManager } from "./components/GlobalAlarmSoundManager"; // ADD THIS
 
 function ProjectLayout() {
     const { isDark } = useTheme();
@@ -44,44 +46,49 @@ function AppContent() {
     return (
         <MuiThemeProvider theme={theme}>
             <CssBaseline />
-            <BrowserRouter>
-                <Routes>
-                    <Route path="/" element={<WelcomePage />} />
-                    <Route path="/login" element={<LoginPage />} />
-                    <Route path="/register" element={<RegisterPage />} />
+            <AlarmSoundProvider> {/* ADD THIS WRAPPER */}
+                <BrowserRouter>
+                    {/* ADD GLOBAL ALARM SOUND MANAGER */}
+                    <GlobalAlarmSoundManager />
 
-                    {/* Public Projects List */}
-                    <Route
-                        path="/projects"
-                        element={
-                            <ProtectedRoute>
-                                <ProjectsPage />
-                            </ProtectedRoute>
-                        }
-                    />
+                    <Routes>
+                        <Route path="/" element={<WelcomePage />} />
+                        <Route path="/login" element={<LoginPage />} />
+                        <Route path="/register" element={<RegisterPage />} />
 
-                    {/* All project context pages with sidebar */}
-                    <Route
-                        path="/project/:projectId"
-                        element={
-                            <ProtectedRoute>
-                                <ProjectLayout />
-                            </ProtectedRoute>
-                        }
-                    >
-                        <Route path="devices" element={<DevicesPage />} />
-                        <Route path="tags" element={<TagsPage />} />
-                        <Route path="alarms" element={<AlarmsPage />} />
-                        <Route path="logs" element={<LogsPage />} />
-                        <Route path="diagram" element={<DiagramEditorPage />} />
-                        <Route path="measurements" element={<MeasurementsPage />} />
-                        <Route index element={<Navigate to="devices" />} />
-                    </Route>
+                        {/* Public Projects List */}
+                        <Route
+                            path="/projects"
+                            element={
+                                <ProtectedRoute>
+                                    <ProjectsPage />
+                                </ProtectedRoute>
+                            }
+                        />
 
-                    {/* Catch-all */}
-                    <Route path="*" element={<Navigate to="/" />} />
-                </Routes>
-            </BrowserRouter>
+                        {/* All project context pages with sidebar */}
+                        <Route
+                            path="/project/:projectId"
+                            element={
+                                <ProtectedRoute>
+                                    <ProjectLayout />
+                                </ProtectedRoute>
+                            }
+                        >
+                            <Route path="devices" element={<DevicesPage />} />
+                            <Route path="tags" element={<TagsPage />} />
+                            <Route path="alarms" element={<AlarmsPage />} />
+                            <Route path="logs" element={<LogsPage />} />
+                            <Route path="diagram" element={<DiagramEditorPage />} />
+                            <Route path="measurements" element={<MeasurementsPage />} />
+                            <Route index element={<Navigate to="devices" />} />
+                        </Route>
+
+                        {/* Catch-all */}
+                        <Route path="*" element={<Navigate to="/" />} />
+                    </Routes>
+                </BrowserRouter>
+            </AlarmSoundProvider> {/* CLOSE WRAPPER */}
         </MuiThemeProvider>
     );
 }

@@ -1,4 +1,4 @@
-// src/hooks/useWebSocket.js - Enhanced with Complete Alarm Support
+// src/hooks/useWebSocket.js - Complete Fixed Version
 import { useEffect, useRef, useState, useCallback } from 'react';
 
 export function useWebSocket(url) {
@@ -42,7 +42,7 @@ export function useWebSocket(url) {
             ws.current.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
-                    console.log('📨 WebSocket message:', data.type);
+                    console.log('📨 WebSocket message:', data.type, data.project_id);
                     setLastMessage(data);
                 } catch (err) {
                     console.error('Error parsing WebSocket message:', err);
@@ -109,7 +109,7 @@ export function useWebSocket(url) {
         });
     }, [sendMessage]);
 
-    // NEW: Alarm-specific methods
+    // Alarm-specific methods
     const acknowledgeAlarm = useCallback((projectId, ruleId, message) => {
         sendMessage({
             type: 'acknowledge_alarm',
@@ -173,7 +173,7 @@ export function useRealTimeData(projectId) {
     const [measurements, setMeasurements] = useState({});
     const [deviceStatuses, setDeviceStatuses] = useState({});
 
-    // ENHANCED: Comprehensive alarm state management
+    // Comprehensive alarm state management
     const [activeAlarms, setActiveAlarms] = useState([]);
     const [alarmSummary, setAlarmSummary] = useState({
         total_active: 0,
@@ -301,26 +301,29 @@ export function useRealTimeData(projectId) {
                     }
                     break;
 
-                // ENHANCED: Comprehensive alarm message handling
+                // 🔧 FIXED ALARM HANDLERS - Match your backend data structure exactly
                 case 'alarm_triggered':
                     if (lastMessage.data) {
-                        console.log('🚨 ALARM TRIGGERED:', lastMessage.data.rule?.rule_name);
+                        console.log('🚨 ALARM TRIGGERED:', lastMessage.data.rule_name);
 
-                        // Add to alarm events
+                        // Add to alarm events with correct data structure
                         setAlarmEvents(prev => [{
                             type: 'triggered',
                             timestamp: new Date().toISOString(),
-                            rule: lastMessage.data.rule,
-                            measurement: lastMessage.data.measurement,
-                            condition_message: lastMessage.data.condition_message
+                            rule_name: lastMessage.data.rule_name,    // ✅ Fixed: Direct access
+                            tag_name: lastMessage.data.tag_name,      // ✅ Fixed: Direct access
+                            value: lastMessage.data.value,            // ✅ Fixed: Direct access
+                            threshold: lastMessage.data.threshold,    // ✅ Fixed: Direct access
+                            severity: lastMessage.data.severity,      // ✅ Fixed: Direct access
+                            message: lastMessage.data.message         // ✅ Fixed: Direct access
                         }, ...prev.slice(0, 99)]);
 
                         // Show browser notification if supported
                         if ('Notification' in window && Notification.permission === 'granted') {
                             new Notification('🚨 SCADA Alarm Triggered', {
-                                body: `${lastMessage.data.rule?.rule_name}: ${lastMessage.data.condition_message}`,
+                                body: `${lastMessage.data.rule_name}: ${lastMessage.data.message}`,
                                 icon: '/alarm-icon.png',
-                                tag: `alarm-${lastMessage.data.rule?.rule_id}`
+                                tag: `alarm-${lastMessage.data.rule_name}`
                             });
                         }
                     }
@@ -342,13 +345,15 @@ export function useRealTimeData(projectId) {
 
                 case 'alarm_cleared':
                     if (lastMessage.data) {
-                        console.log('🟢 ALARM CLEARED:', lastMessage.data.rule?.rule_name);
+                        console.log('🟢 ALARM CLEARED:', lastMessage.data.rule_name);
 
                         setAlarmEvents(prev => [{
                             type: 'cleared',
                             timestamp: new Date().toISOString(),
-                            rule: lastMessage.data.rule,
-                            measurement: lastMessage.data.measurement
+                            rule_name: lastMessage.data.rule_name,    // ✅ Fixed: Direct access
+                            tag_name: lastMessage.data.tag_name,      // ✅ Fixed: Direct access
+                            value: lastMessage.data.value,            // ✅ Fixed: Direct access
+                            threshold: lastMessage.data.threshold     // ✅ Fixed: Direct access
                         }, ...prev.slice(0, 99)]);
                     }
                     break;
@@ -475,7 +480,7 @@ export function useRealTimeData(projectId) {
         });
     }, [deviceStatuses]);
 
-    // ENHANCED: Alarm-specific helper functions
+    // Alarm-specific helper functions
     const acknowledgeAlarm = useCallback((ruleId, message = 'Acknowledged via WebSocket') => {
         if (projectId) {
             wsAcknowledgeAlarm(projectId, ruleId, message);
@@ -520,7 +525,7 @@ export function useRealTimeData(projectId) {
         measurements,
         deviceStatuses,
 
-        // ENHANCED: Comprehensive alarm data
+        // Comprehensive alarm data
         activeAlarms,
         alarmSummary,
         alarmEvents,
@@ -533,7 +538,7 @@ export function useRealTimeData(projectId) {
         getRecentMeasurements,
         getActiveDevices,
 
-        // ENHANCED: Alarm helper functions
+        // Alarm helper functions
         acknowledgeAlarm,
         getAlarmsByTag,
         getAlarmsBySeverity,

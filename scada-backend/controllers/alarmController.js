@@ -1,14 +1,165 @@
-// controllers/alarmController.js - Complete Fixed Version with WebSocket Integration
+// =============================================================================
+// 📁 controllers/alarmController.js - FIXED COMPLETE VERSION
+// =============================================================================
+
 const pool = require('../db');
 
 console.log('🚨 AlarmController: Loading complete SCADA alarm system...');
 
 // =============================================================================
+// 🔧 DEBUG FUNCTIONS (For troubleshooting)
+// =============================================================================
+
+const debugAlarmState = async (req, res) => {
+    const { projectId, ruleId } = req.params;
+
+    console.log('🔧 DEBUG ALARM STATE');
+    console.log('   Project ID:', projectId);
+    console.log('   Rule ID:', ruleId);
+    console.log('   User ID:', req.user?.id);
+
+    try {
+        // Check if alarm rule exists
+        const ruleCheck = await pool.query(
+            'SELECT * FROM alarm_rules WHERE id = $1 AND project_id = $2',
+            [ruleId, projectId]
+        );
+        console.log('🔧 Rule exists:', ruleCheck.rows.length > 0);
+
+        // Check if alarm state exists
+        const stateCheck = await pool.query(
+            'SELECT * FROM alarm_states WHERE rule_id = $1',
+            [ruleId]
+        );
+        console.log('🔧 Alarm state exists:', stateCheck.rows.length > 0);
+
+        // Check recent events
+        const eventsCheck = await pool.query(
+            'SELECT * FROM alarm_events WHERE rule_id = $1 ORDER BY created_at DESC LIMIT 5',
+            [ruleId]
+        );
+
+        // Check project ownership
+        const projectCheck = await pool.query(
+            'SELECT * FROM projects WHERE id = $1 AND user_id = $2',
+            [projectId, req.user.id]
+        );
+
+        res.json({
+            rule_exists: ruleCheck.rows.length > 0,
+            rule_details: ruleCheck.rows[0] || null,
+            state_exists: stateCheck.rows.length > 0,
+            state_details: stateCheck.rows[0] || null,
+            recent_events: eventsCheck.rows,
+            project_access: projectCheck.rows.length > 0,
+            debug_info: {
+                rule_id: ruleId,
+                project_id: projectId,
+                user_id: req.user.id
+            }
+        });
+
+    } catch (error) {
+        console.error('🔧 Debug error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+const debugAlarmStates = async (req, res) => {
+    const { projectId } = req.params;
+
+    try {
+        const statesQuery = `
+            SELECT 
+                s.*,
+                r.rule_name,
+                r.enabled,
+                COALESCE(t.tag_name, 'Unknown Tag') as tag_name,
+                COALESCE(d.device_name, 'Unknown Device') as device_name
+            FROM alarm_states s
+            JOIN alarm_rules r ON s.rule_id = r.id
+            LEFT JOIN tags t ON s.tag_id = t.tag_id  
+            LEFT JOIN devices d ON s.device_id = d.device_id
+            WHERE s.project_id = $1
+            ORDER BY s.triggered_at DESC
+        `;
+
+        const result = await pool.query(statesQuery, [projectId]);
+
+        res.json({
+            total_states: result.rows.length,
+            triggered: result.rows.filter(s => s.state === 'triggered').length,
+            acknowledged: result.rows.filter(s => s.state === 'acknowledged').length,
+            states: result.rows
+        });
+
+    } catch (error) {
+        console.error('❌ Debug alarm states error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+const forceCreateAlarmState = async (req, res) => {
+    const { projectId, ruleId } = req.params;
+    const { trigger_value = 100 } = req.body;
+
+    console.log('🔧 Force creating alarm state for testing');
+
+    try {
+        // Get rule details
+        const ruleQuery = await pool.query(
+            'SELECT * FROM alarm_rules WHERE id = $1 AND project_id = $2',
+            [ruleId, projectId]
+        );
+
+        if (ruleQuery.rows.length === 0) {
+            return res.status(404).json({ error: 'Alarm rule not found' });
+        }
+
+        const rule = ruleQuery.rows[0];
+
+        // Delete existing state if any
+        await pool.query('DELETE FROM alarm_states WHERE rule_id = $1', [ruleId]);
+
+        // Create new alarm state
+        const result = await pool.query(`
+            INSERT INTO alarm_states (
+                rule_id, tag_id, device_id, project_id,
+                state, trigger_value, triggered_at
+            ) VALUES ($1, $2, $3, $4, 'triggered', $5, NOW())
+            RETURNING *
+        `, [ruleId, rule.tag_id, rule.device_id, projectId, trigger_value]);
+
+        // Create alarm event
+        await pool.query(`
+            INSERT INTO alarm_events (
+                rule_id, tag_id, device_id, project_id, user_id,
+                event_type, trigger_value, threshold_value, condition_type,
+                severity, message, created_at
+            ) VALUES ($1, $2, $3, $4, $5, 'triggered', $6, $7, $8, $9, $10, NOW())
+        `, [
+            ruleId, rule.tag_id, rule.device_id, projectId, req.user.id,
+            trigger_value, rule.threshold, rule.condition_type, rule.severity || 'warning',
+            `FORCE TRIGGERED: ${rule.rule_name} for testing`
+        ]);
+
+        res.json({
+            success: true,
+            message: `Force created alarm state for rule: ${rule.rule_name}`,
+            alarm_state: result.rows[0]
+        });
+
+    } catch (error) {
+        console.error('❌ Force create alarm state error:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// =============================================================================
 // ALARM RULES MANAGEMENT (Configuration)
 // =============================================================================
 
-// GET ALL ALARM RULES FOR PROJECT
-exports.getAlarmRulesByProject = async (req, res) => {
+const getAlarmRulesByProject = async (req, res) => {
     console.log('🚨 GET ALARM RULES REQUEST');
     const { projectId } = req.params;
     const { enabled, severity, tag_id } = req.query;
@@ -65,19 +216,19 @@ exports.getAlarmRulesByProject = async (req, res) => {
                 r.project_id,
                 r.created_at,
                 r.updated_at,
-                t.tag_name,
-                t.tag_type,
-                t.engineering_unit,
-                d.device_name,
-                d.device_type,
+                COALESCE(t.tag_name, 'Unknown Tag') as tag_name,
+                COALESCE(t.tag_type, 'unknown') as tag_type,
+                COALESCE(t.engineering_unit, '') as engineering_unit,
+                COALESCE(d.device_name, 'Unknown Device') as device_name,
+                COALESCE(d.device_type, 'unknown') as device_type,
                 s.state as current_state,
                 s.trigger_value as current_trigger_value,
                 s.triggered_at as last_triggered,
                 s.acknowledged_at,
-                u_ack.username as acknowledged_by_username
+                COALESCE(u_ack.username, '') as acknowledged_by_username
             FROM alarm_rules r
-            JOIN tags t ON r.tag_id = t.tag_id
-            JOIN devices d ON r.device_id = d.device_id
+            LEFT JOIN tags t ON r.tag_id = t.tag_id
+            LEFT JOIN devices d ON r.device_id = d.device_id
             LEFT JOIN alarm_states s ON r.id = s.rule_id
             LEFT JOIN users u_ack ON s.acknowledged_by = u_ack.id
             WHERE ${whereConditions.join(' AND ')}
@@ -98,8 +249,7 @@ exports.getAlarmRulesByProject = async (req, res) => {
     }
 };
 
-// CREATE ALARM RULE
-exports.createAlarmRule = async (req, res) => {
+const createAlarmRule = async (req, res) => {
     console.log('🚨 CREATE ALARM RULE REQUEST');
     const { projectId } = req.params;
     const {
@@ -129,16 +279,20 @@ exports.createAlarmRule = async (req, res) => {
 
         // Check project access and validate tag/device belong to project
         const validationQuery = `
-            SELECT t.tag_name, d.device_name, p.user_id, p.project_name
-            FROM tags t
-            JOIN devices d ON t.device_id = d.device_id
-            JOIN projects p ON d.project_id = p.id
-            WHERE t.tag_id = $1 AND d.device_id = $2 AND p.id = $3 AND p.user_id = $4
+            SELECT 
+                COALESCE(t.tag_name, 'Unknown Tag') as tag_name, 
+                COALESCE(d.device_name, 'Unknown Device') as device_name, 
+                p.user_id, 
+                p.project_name
+            FROM projects p
+            LEFT JOIN devices d ON d.project_id = p.id AND d.device_id = $2
+            LEFT JOIN tags t ON t.device_id = d.device_id AND t.tag_id = $1
+            WHERE p.id = $3 AND p.user_id = $4
         `;
         const validationResult = await client.query(validationQuery, [tag_id, device_id, projectId, req.user.id]);
 
         if (validationResult.rows.length === 0) {
-            throw new Error('Invalid tag/device for this project or access denied');
+            throw new Error('Project not found or access denied');
         }
 
         const validation = validationResult.rows[0];
@@ -227,8 +381,7 @@ exports.createAlarmRule = async (req, res) => {
     }
 };
 
-// UPDATE ALARM RULE
-exports.updateAlarmRule = async (req, res) => {
+const updateAlarmRule = async (req, res) => {
     console.log('🚨 UPDATE ALARM RULE REQUEST');
     const { projectId, ruleId } = req.params;
     const updateData = req.body;
@@ -240,11 +393,14 @@ exports.updateAlarmRule = async (req, res) => {
 
         // Check if rule exists and user has project access
         const ruleCheckQuery = `
-            SELECT r.*, t.tag_name, d.device_name, p.user_id
+            SELECT r.*, 
+                   COALESCE(t.tag_name, 'Unknown Tag') as tag_name, 
+                   COALESCE(d.device_name, 'Unknown Device') as device_name, 
+                   p.user_id
             FROM alarm_rules r
-                     JOIN tags t ON r.tag_id = t.tag_id
-                     JOIN devices d ON r.device_id = d.device_id
-                     JOIN projects p ON r.project_id = p.id
+            LEFT JOIN tags t ON r.tag_id = t.tag_id
+            LEFT JOIN devices d ON r.device_id = d.device_id
+            JOIN projects p ON r.project_id = p.id
             WHERE r.id = $1 AND p.id = $2 AND p.user_id = $3
         `;
         const ruleResult = await client.query(ruleCheckQuery, [ruleId, projectId, req.user.id]);
@@ -296,7 +452,7 @@ exports.updateAlarmRule = async (req, res) => {
             UPDATE alarm_rules
             SET ${updateFields.join(', ')}
             WHERE id = $${valueIndex}
-                RETURNING *
+            RETURNING *
         `;
 
         const result = await client.query(updateQuery, updateValues);
@@ -308,8 +464,8 @@ exports.updateAlarmRule = async (req, res) => {
 
             // Log the disable event
             await client.query(`
-                INSERT INTO alarm_events (rule_id, tag_id, device_id, project_id, user_id, event_type, message)
-                VALUES ($1, $2, $3, $4, $5, 'disabled', 'Alarm rule disabled')
+                INSERT INTO alarm_events (rule_id, tag_id, device_id, project_id, user_id, event_type, message, created_at)
+                VALUES ($1, $2, $3, $4, $5, 'disabled', 'Alarm rule disabled', NOW())
             `, [ruleId, ruleCheck.tag_id, ruleCheck.device_id, projectId, req.user.id]);
         }
 
@@ -361,8 +517,7 @@ exports.updateAlarmRule = async (req, res) => {
     }
 };
 
-// DELETE ALARM RULE
-exports.deleteAlarmRule = async (req, res) => {
+const deleteAlarmRule = async (req, res) => {
     console.log('🚨 DELETE ALARM RULE REQUEST');
     const { projectId, ruleId } = req.params;
 
@@ -373,11 +528,14 @@ exports.deleteAlarmRule = async (req, res) => {
 
         // Check if rule exists and user has project access
         const ruleCheckQuery = `
-            SELECT r.*, t.tag_name, d.device_name, p.user_id
+            SELECT r.*, 
+                   COALESCE(t.tag_name, 'Unknown Tag') as tag_name, 
+                   COALESCE(d.device_name, 'Unknown Device') as device_name, 
+                   p.user_id
             FROM alarm_rules r
-                     JOIN tags t ON r.tag_id = t.tag_id
-                     JOIN devices d ON r.device_id = d.device_id
-                     JOIN projects p ON r.project_id = p.id
+            LEFT JOIN tags t ON r.tag_id = t.tag_id
+            LEFT JOIN devices d ON r.device_id = d.device_id
+            JOIN projects p ON r.project_id = p.id
             WHERE r.id = $1 AND p.id = $2 AND p.user_id = $3
         `;
         const ruleResult = await client.query(ruleCheckQuery, [ruleId, projectId, req.user.id]);
@@ -440,11 +598,10 @@ exports.deleteAlarmRule = async (req, res) => {
 // ACTIVE ALARMS MANAGEMENT (Current State)
 // =============================================================================
 
-// GET ACTIVE ALARMS FOR PROJECT - FIXED
-exports.getActiveAlarms = async (req, res) => {
+const getActiveAlarms = async (req, res) => {
     console.log('🚨 GET ACTIVE ALARMS REQUEST');
     const { projectId } = req.params;
-    const { state } = req.query;
+    const { state = 'triggered' } = req.query; // DEFAULT to only triggered (unacknowledged)
 
     try {
         // Check project access
@@ -455,11 +612,14 @@ exports.getActiveAlarms = async (req, res) => {
             return res.status(404).json({ error: 'Project not found or access denied' });
         }
 
-        // Build query for active alarms with full details
+        // Build query for active alarms - ONLY show unacknowledged by default
         let whereConditions = ['s.project_id = $1'];
         let queryParams = [projectId];
 
-        if (state) {
+        // 🔧 FIX: Default to only 'triggered' state (unacknowledged alarms)
+        if (state === 'all') {
+            // Only show all states if explicitly requested
+        } else {
             whereConditions.push('s.state = $2');
             queryParams.push(state);
         }
@@ -472,23 +632,24 @@ exports.getActiveAlarms = async (req, res) => {
                 r.threshold,
                 r.condition_type,
                 r.message as rule_message,
-                t.tag_name,
-                t.engineering_unit,
-                d.device_name,
-                d.device_type,
-                u_ack.username as acknowledged_by_username
+                r.enabled,
+                COALESCE(t.tag_name, 'Unknown Tag') as tag_name,
+                COALESCE(t.engineering_unit, '') as engineering_unit,
+                COALESCE(d.device_name, 'Unknown Device') as device_name,
+                COALESCE(d.device_type, 'unknown') as device_type,
+                COALESCE(u_ack.username, '') as acknowledged_by_username
             FROM alarm_states s
-                     JOIN alarm_rules r ON s.rule_id = r.id
-                     JOIN tags t ON s.tag_id = t.tag_id
-                     JOIN devices d ON s.device_id = d.device_id
-                     LEFT JOIN users u_ack ON s.acknowledged_by = u_ack.id
+            JOIN alarm_rules r ON s.rule_id = r.id
+            LEFT JOIN tags t ON s.tag_id = t.tag_id
+            LEFT JOIN devices d ON s.device_id = d.device_id
+            LEFT JOIN users u_ack ON s.acknowledged_by = u_ack.id
             WHERE ${whereConditions.join(' AND ')}
             ORDER BY s.triggered_at DESC
         `;
 
         const result = await pool.query(activeAlarmsQuery, queryParams);
 
-        console.log(`✅ Found ${result.rows.length} active alarms for project`);
+        console.log(`✅ Found ${result.rows.length} active alarms for project (state: ${state})`);
         res.json(result.rows);
 
     } catch (error) {
@@ -500,78 +661,181 @@ exports.getActiveAlarms = async (req, res) => {
     }
 };
 
-// ACKNOWLEDGE ALARM - FIXED
-exports.acknowledgeAlarm = async (req, res) => {
-    console.log('🚨 ACKNOWLEDGE ALARM REQUEST');
+const acknowledgeAlarm = async (req, res) => {
+    console.log('🚨 ACKNOWLEDGE ALARM REQUEST - Enhanced Debug');
     const { projectId, ruleId } = req.params;
     const { message: ackMessage } = req.body;
+
+    console.log('🔧 Debug Info:');
+    console.log('   Project ID:', projectId);
+    console.log('   Rule ID:', ruleId);
+    console.log('   User ID:', req.user?.id);
+    console.log('   Ack Message:', ackMessage);
 
     const client = await pool.connect();
 
     try {
         await client.query('BEGIN');
 
-        // Check if alarm state exists and user has access
-        const alarmCheckQuery = `
-            SELECT s.*, r.rule_name, t.tag_name, d.device_name
-            FROM alarm_states s
-                     JOIN alarm_rules r ON s.rule_id = r.id
-                     JOIN tags t ON s.tag_id = t.tag_id
-                     JOIN devices d ON s.device_id = d.device_id
-                     JOIN projects p ON s.project_id = p.id
-            WHERE s.rule_id = $1 AND p.id = $2 AND p.user_id = $3 AND s.state = 'triggered'
-        `;
-        const alarmResult = await client.query(alarmCheckQuery, [ruleId, projectId, req.user.id]);
+        // 🔧 STEP 1: Check if alarm rule exists and user has access
+        console.log('🔍 Step 1: Checking alarm rule and project access...');
 
-        if (alarmResult.rows.length === 0) {
-            throw new Error('Active alarm not found or access denied');
+        const ruleAccessQuery = `
+            SELECT r.*, p.user_id as project_owner
+            FROM alarm_rules r
+            JOIN projects p ON r.project_id = p.id
+            WHERE r.id = $1 AND r.project_id = $2
+        `;
+
+        const ruleResult = await client.query(ruleAccessQuery, [ruleId, projectId]);
+
+        if (ruleResult.rows.length === 0) {
+            throw new Error('Alarm rule not found or project access denied');
         }
 
-        const alarmCheck = alarmResult.rows[0];
+        const rule = ruleResult.rows[0];
+        console.log('🔍 Rule found:', rule.rule_name);
+        console.log('🔍 Project owner:', rule.project_owner);
+        console.log('🔍 Current user:', req.user.id);
 
-        // Update alarm state to acknowledged
-        await client.query(`
+        // Check if user owns the project
+        if (rule.project_owner !== req.user.id) {
+            throw new Error('User does not own this project');
+        }
+
+        // 🔧 STEP 2: Check current alarm state (or create if missing)
+        console.log('🔍 Step 2: Checking current alarm state...');
+
+        const currentStateQuery = `
+            SELECT s.*, 
+                   COALESCE(t.tag_name, 'Unknown Tag') as tag_name, 
+                   COALESCE(d.device_name, 'Unknown Device') as device_name
+            FROM alarm_states s
+            LEFT JOIN tags t ON s.tag_id = t.tag_id
+            LEFT JOIN devices d ON s.device_id = d.device_id
+            WHERE s.rule_id = $1
+        `;
+
+        const currentStateResult = await client.query(currentStateQuery, [ruleId]);
+
+        console.log('🔍 Existing alarm states found:', currentStateResult.rows.length);
+
+        let currentAlarm;
+
+        if (currentStateResult.rows.length === 0) {
+            // 🔧 FIX: Create missing alarm state if it doesn't exist
+            console.log('⚠️ No alarm state found, creating one...');
+
+            const createStateQuery = `
+                INSERT INTO alarm_states (
+                    rule_id, tag_id, device_id, project_id,
+                    state, trigger_value, triggered_at
+                ) VALUES ($1, $2, $3, $4, 'triggered', 0, NOW())
+                RETURNING *
+            `;
+
+            const createResult = await client.query(createStateQuery, [
+                ruleId, rule.tag_id, rule.device_id, projectId
+            ]);
+
+            // Get the full details
+            const newStateResult = await client.query(currentStateQuery, [ruleId]);
+            currentAlarm = newStateResult.rows[0];
+
+            console.log('✅ Created alarm state:', currentAlarm);
+        } else {
+            currentAlarm = currentStateResult.rows[0];
+            console.log('✅ Found existing alarm state:', currentAlarm.state);
+        }
+
+        // Check if already acknowledged
+        if (currentAlarm.state === 'acknowledged') {
+            console.log('⚠️ Alarm already acknowledged');
+            return res.status(400).json({
+                error: 'Alarm is already acknowledged',
+                current_state: currentAlarm.state,
+                acknowledged_at: currentAlarm.acknowledged_at
+            });
+        }
+
+        // 🔧 STEP 3: Update alarm state to acknowledged
+        console.log('🔧 Step 3: Updating alarm state to acknowledged...');
+
+        const updateStateQuery = `
             UPDATE alarm_states
             SET state = 'acknowledged',
                 acknowledged_at = NOW(),
                 acknowledged_by = $1,
                 ack_message = $2
             WHERE rule_id = $3
-        `, [req.user.id, ackMessage, ruleId]);
+            RETURNING *
+        `;
 
-        // Create acknowledgment event
-        await client.query(`
-            INSERT INTO alarm_events (
-                rule_id, tag_id, device_id, project_id, user_id,
-                event_type, message, acknowledged_at, acknowledged_by, ack_message
-            ) VALUES ($1, $2, $3, $4, $5, 'acknowledged', $6, NOW(), $7, $8)
-        `, [
-            ruleId, alarmCheck.tag_id, alarmCheck.device_id, projectId, req.user.id,
-            `Alarm acknowledged: ${alarmCheck.rule_name}`, req.user.id, ackMessage
+        const updateResult = await client.query(updateStateQuery, [
+            req.user.id,
+            ackMessage || 'Acknowledged by operator',
+            ruleId
         ]);
 
-        await client.query('COMMIT');
+        console.log('🔧 Update result:', updateResult.rows.length, 'rows affected');
 
-        console.log('✅ Alarm acknowledged successfully:', alarmCheck.rule_name);
+        if (updateResult.rows.length === 0) {
+            throw new Error('Failed to update alarm state - no rows affected');
+        }
+
+        const updatedAlarm = updateResult.rows[0];
+        console.log('✅ Alarm state updated:', updatedAlarm.state);
+
+        // 🔧 STEP 4: Create acknowledgment event
+        console.log('🔧 Step 4: Creating acknowledgment event...');
+
+        const eventQuery = `
+            INSERT INTO alarm_events (
+                rule_id, tag_id, device_id, project_id, user_id,
+                event_type, message, acknowledged_at, acknowledged_by, ack_message,
+                created_at
+            ) VALUES ($1, $2, $3, $4, $5, 'acknowledged', $6, NOW(), $7, $8, NOW())
+            RETURNING id, event_type, created_at
+        `;
+
+        const eventResult = await client.query(eventQuery, [
+            ruleId,
+            currentAlarm.tag_id,
+            currentAlarm.device_id,
+            projectId,
+            req.user.id,
+            `Alarm acknowledged: ${rule.rule_name}`,
+            req.user.id,
+            ackMessage || 'Acknowledged by operator'
+        ]);
+
+        console.log('✅ Acknowledgment event created:', eventResult.rows[0]);
+
+        await client.query('COMMIT');
+        console.log('✅ Transaction committed successfully');
 
         // Send WebSocket notification
         try {
             if (global.wsManager) {
-                global.wsManager.broadcastToProject(projectId, {
+                console.log('📡 Sending WebSocket notification...');
+
+                await global.wsManager.broadcastToProject(projectId, {
                     type: 'alarm_acknowledged',
                     data: {
                         rule_id: ruleId,
-                        rule_name: alarmCheck.rule_name,
-                        tag_name: alarmCheck.tag_name,
-                        device_name: alarmCheck.device_name,
+                        rule_name: rule.rule_name,
+                        tag_name: currentAlarm.tag_name,
+                        device_name: currentAlarm.device_name,
                         acknowledged_by: req.user.username,
                         ack_message: ackMessage,
-                        project_id: projectId
+                        project_id: projectId,
+                        timestamp: new Date().toISOString()
                     }
                 });
 
                 // Send updated alarm summary
-                global.wsManager.broadcastAlarmSummary(projectId);
+                await global.wsManager.broadcastAlarmSummary(projectId);
+                console.log('📡 WebSocket notifications sent');
             }
         } catch (wsError) {
             console.log('⚠️ WebSocket notification failed:', wsError.message);
@@ -579,15 +843,30 @@ exports.acknowledgeAlarm = async (req, res) => {
 
         res.json({
             success: true,
-            message: `Alarm "${alarmCheck.rule_name}" acknowledged successfully`
+            message: `Alarm "${rule.rule_name}" acknowledged successfully`,
+            alarm: {
+                rule_id: ruleId,
+                rule_name: rule.rule_name,
+                state: 'acknowledged',
+                acknowledged_at: updatedAlarm.acknowledged_at,
+                acknowledged_by: req.user.username,
+                ack_message: ackMessage
+            }
         });
 
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('❌ Error acknowledging alarm:', error);
+        console.error('❌ Error stack:', error.stack);
+
         res.status(500).json({
             error: 'Failed to acknowledge alarm',
-            details: error.message
+            details: error.message,
+            debug_info: {
+                rule_id: ruleId,
+                project_id: projectId,
+                user_id: req.user?.id
+            }
         });
     } finally {
         client.release();
@@ -598,8 +877,7 @@ exports.acknowledgeAlarm = async (req, res) => {
 // ALARM EVENTS (History)
 // =============================================================================
 
-// GET ALARM EVENTS (History) FOR PROJECT
-exports.getAlarmEvents = async (req, res) => {
+const getAlarmEvents = async (req, res) => {
     console.log('🚨 GET ALARM EVENTS REQUEST');
     const { projectId } = req.params;
     const { event_type, rule_id, limit = 100, days = 7 } = req.query;
@@ -636,19 +914,19 @@ exports.getAlarmEvents = async (req, res) => {
             SELECT
                 e.*,
                 r.rule_name,
-                t.tag_name,
-                t.engineering_unit,
-                d.device_name,
-                d.device_type,
-                u_ack.username as acknowledged_by_username
+                COALESCE(t.tag_name, 'Unknown Tag') as tag_name,
+                COALESCE(t.engineering_unit, '') as engineering_unit,
+                COALESCE(d.device_name, 'Unknown Device') as device_name,
+                COALESCE(d.device_type, 'unknown') as device_type,
+                COALESCE(u_ack.username, '') as acknowledged_by_username
             FROM alarm_events e
-                     JOIN alarm_rules r ON e.rule_id = r.id
-                     JOIN tags t ON e.tag_id = t.tag_id
-                     JOIN devices d ON e.device_id = d.device_id
-                     LEFT JOIN users u_ack ON e.acknowledged_by = u_ack.id
+            JOIN alarm_rules r ON e.rule_id = r.id
+            LEFT JOIN tags t ON e.tag_id = t.tag_id
+            LEFT JOIN devices d ON e.device_id = d.device_id
+            LEFT JOIN users u_ack ON e.acknowledged_by = u_ack.id
             WHERE ${whereConditions.join(' AND ')}
             ORDER BY e.created_at DESC
-                LIMIT $${paramIndex}
+            LIMIT $${paramIndex}
         `;
 
         const result = await pool.query(eventsQuery, queryParams);
@@ -666,193 +944,10 @@ exports.getAlarmEvents = async (req, res) => {
 };
 
 // =============================================================================
-// REAL-TIME ALARM EVALUATION - COMPLETE FIXED VERSION
-// =============================================================================
-
-// EVALUATE ALARM CONDITIONS (Real-time) - COMPLETE FIXED
-exports.evaluateAlarmConditions = async (measurements) => {
-    console.log('🔄 Evaluating alarm conditions for', Object.keys(measurements).length, 'measurements');
-
-    const client = await pool.connect();
-
-    try {
-        await client.query('BEGIN');
-
-        // Get all enabled alarm rules
-        const rulesQuery = `
-            SELECT r.*, t.tag_name, d.device_name
-            FROM alarm_rules r
-                     JOIN tags t ON r.tag_id = t.tag_id
-                     JOIN devices d ON r.device_id = d.device_id
-            WHERE r.enabled = true
-        `;
-        const rulesResult = await client.query(rulesQuery);
-        const rules = rulesResult.rows;
-
-        const alarmEvents = [];
-
-        for (const rule of rules) {
-            const measurement = measurements[rule.tag_id];
-            if (!measurement || measurement.value === null || measurement.value === undefined) {
-                continue;
-            }
-
-            const currentValue = parseFloat(measurement.value);
-            const threshold = parseFloat(rule.threshold);
-
-            // Simple condition evaluation
-            let conditionMet = false;
-            switch (rule.condition_type) {
-                case 'high':
-                    conditionMet = currentValue > threshold;
-                    break;
-                case 'low':
-                    conditionMet = currentValue < threshold;
-                    break;
-                case 'change':
-                    // Simple change detection
-                    conditionMet = Math.abs(currentValue - threshold) > (rule.deadband || 0);
-                    break;
-            }
-
-            // Check current alarm state
-            const stateQuery = `SELECT * FROM alarm_states WHERE rule_id = $1`;
-            const stateResult = await client.query(stateQuery, [rule.id]);
-            const currentState = stateResult.rows[0];
-
-            if (conditionMet && !currentState) {
-                // NEW ALARM TRIGGERED
-
-                // Create alarm state
-                await client.query(`
-                    INSERT INTO alarm_states (
-                        rule_id, tag_id, device_id, project_id,
-                        state, trigger_value, triggered_at
-                    ) VALUES ($1, $2, $3, $4, 'triggered', $5, NOW())
-                `, [rule.id, rule.tag_id, rule.device_id, rule.project_id, currentValue]);
-
-                // Create alarm event
-                const eventResult = await client.query(`
-                    INSERT INTO alarm_events (
-                        rule_id, tag_id, device_id, project_id, user_id,
-                        event_type, trigger_value, threshold_value, condition_type,
-                        severity, message
-                    ) VALUES ($1, $2, $3, $4, $5, 'triggered', $6, $7, $8, $9, $10)
-                    RETURNING *
-                `, [
-                    rule.id, rule.tag_id, rule.device_id, rule.project_id, rule.user_id,
-                    currentValue, threshold, rule.condition_type, rule.severity,
-                    rule.message || `${rule.rule_name}: ${currentValue} ${rule.condition_type} ${threshold}`
-                ]);
-
-                alarmEvents.push({
-                    type: 'triggered',
-                    event: eventResult.rows[0],
-                    rule: rule,
-                    measurement: measurement
-                });
-
-                console.log(`🚨 Alarm triggered: ${rule.rule_name} (${currentValue} ${rule.condition_type} ${threshold})`);
-
-                // Send WebSocket notification immediately
-                try {
-                    if (global.wsManager) {
-                        global.wsManager.broadcastAlarmEvent(rule.project_id, 'triggered', {
-                            rule: rule,
-                            measurement: measurement,
-                            trigger_value: currentValue,
-                            threshold: threshold,
-                            condition: rule.condition_type
-                        });
-                    }
-                } catch (wsError) {
-                    console.log('⚠️ WebSocket alarm notification failed:', wsError.message);
-                }
-
-            } else if (!conditionMet && currentState && currentState.state === 'triggered') {
-                // ALARM CLEARED
-
-                // Remove alarm state
-                await client.query(`DELETE FROM alarm_states WHERE rule_id = $1`, [rule.id]);
-
-                // Create cleared event
-                await client.query(`
-                    INSERT INTO alarm_events (
-                        rule_id, tag_id, device_id, project_id, user_id,
-                        event_type, trigger_value, threshold_value, condition_type,
-                        severity, message, cleared_at
-                    ) VALUES ($1, $2, $3, $4, $5, 'cleared', $6, $7, $8, $9, $10, NOW())
-                `, [
-                    rule.id, rule.tag_id, rule.device_id, rule.project_id, rule.user_id,
-                    currentValue, threshold, rule.condition_type, rule.severity,
-                    `${rule.rule_name}: CLEARED - ${currentValue}`
-                ]);
-
-                alarmEvents.push({
-                    type: 'cleared',
-                    rule: rule,
-                    measurement: measurement
-                });
-
-                console.log(`✅ Alarm cleared: ${rule.rule_name} (${currentValue})`);
-
-                // Send WebSocket notification
-                try {
-                    if (global.wsManager) {
-                        global.wsManager.broadcastAlarmEvent(rule.project_id, 'cleared', {
-                            rule: rule,
-                            measurement: measurement,
-                            clear_value: currentValue
-                        });
-                    }
-                } catch (wsError) {
-                    console.log('⚠️ WebSocket alarm notification failed:', wsError.message);
-                }
-            }
-        }
-
-        await client.query('COMMIT');
-
-        // Send alarm summary updates for affected projects
-        if (alarmEvents.length > 0 && global.wsManager) {
-            const projectIds = [...new Set(alarmEvents.map(e => e.rule.project_id))];
-            for (const projectId of projectIds) {
-                try {
-                    await global.wsManager.broadcastAlarmSummary(projectId);
-                } catch (wsError) {
-                    console.log('⚠️ WebSocket summary notification failed:', wsError.message);
-                }
-            }
-        }
-
-        return alarmEvents;
-
-    } catch (error) {
-        await client.query('ROLLBACK');
-        console.error('❌ Error evaluating alarm conditions:', error);
-        throw error;
-    } finally {
-        client.release();
-    }
-};
-
-// HANDLE REAL-TIME MEASUREMENTS (Called from WebSocket)
-exports.handleRealTimeMeasurements = async (measurements) => {
-    try {
-        const alarmEvents = await exports.evaluateAlarmConditions(measurements);
-        console.log(`📊 Processed ${alarmEvents.length} alarm events from real-time data`);
-        return alarmEvents;
-    } catch (error) {
-        console.error('❌ Error handling real-time measurements for alarms:', error);
-    }
-};
-
-// =============================================================================
 // PROJECT STATISTICS
 // =============================================================================
 
-// GET PROJECT ALARM STATISTICS
-exports.getProjectAlarmStats = async (req, res) => {
+const getProjectAlarmStats = async (req, res) => {
     console.log('🚨 GET PROJECT ALARM STATS REQUEST');
     const { projectId } = req.params;
 
@@ -921,39 +1016,217 @@ exports.getProjectAlarmStats = async (req, res) => {
 };
 
 // =============================================================================
-// LEGACY COMPATIBILITY (Keep for backward compatibility)
+// REAL-TIME ALARM EVALUATION
 // =============================================================================
 
-// Legacy: Get alarms (maps to alarm rules)
-exports.getAlarms = exports.getAlarmRulesByProject;
+const evaluateAlarmConditions = async (measurements) => {
+    console.log('🔄 Evaluating alarm conditions for', Object.keys(measurements).length, 'measurements');
 
-// Legacy: Create alarm (maps to alarm rule)
-exports.createAlarm = exports.createAlarmRule;
+    const client = await pool.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        // Get all enabled alarm rules
+        const rulesQuery = `
+            SELECT r.*, 
+                   COALESCE(t.tag_name, 'Unknown Tag') as tag_name, 
+                   COALESCE(d.device_name, 'Unknown Device') as device_name
+            FROM alarm_rules r
+            LEFT JOIN tags t ON r.tag_id = t.tag_id
+            LEFT JOIN devices d ON r.device_id = d.device_id
+            WHERE r.enabled = true
+        `;
+        const rulesResult = await client.query(rulesQuery);
+        const rules = rulesResult.rows;
+
+        const alarmEvents = [];
+
+        for (const rule of rules) {
+            const measurement = measurements[rule.tag_id];
+            if (!measurement || measurement.value === null || measurement.value === undefined) {
+                continue;
+            }
+
+            const currentValue = parseFloat(measurement.value);
+            const threshold = parseFloat(rule.threshold);
+
+            // Simple condition evaluation
+            let conditionMet = false;
+            switch (rule.condition_type) {
+                case 'high':
+                    conditionMet = currentValue > threshold;
+                    break;
+                case 'low':
+                    conditionMet = currentValue < threshold;
+                    break;
+                case 'change':
+                    conditionMet = Math.abs(currentValue - threshold) > (rule.deadband || 0);
+                    break;
+            }
+
+            // Check current alarm state
+            const stateQuery = `SELECT * FROM alarm_states WHERE rule_id = $1`;
+            const stateResult = await client.query(stateQuery, [rule.id]);
+            const currentState = stateResult.rows[0];
+
+            if (conditionMet && !currentState) {
+                // NEW ALARM TRIGGERED
+
+                await client.query(`
+                    INSERT INTO alarm_states (
+                        rule_id, tag_id, device_id, project_id,
+                        state, trigger_value, triggered_at
+                    ) VALUES ($1, $2, $3, $4, 'triggered', $5, NOW())
+                `, [rule.id, rule.tag_id, rule.device_id, rule.project_id, currentValue]);
+
+                // Create alarm event
+                const eventResult = await client.query(`
+                    INSERT INTO alarm_events (
+                        rule_id, tag_id, device_id, project_id, user_id,
+                        event_type, trigger_value, threshold_value, condition_type,
+                        severity, message, created_at
+                    ) VALUES ($1, $2, $3, $4, $5, 'triggered', $6, $7, $8, $9, $10, NOW())
+                    RETURNING *
+                `, [
+                    rule.id, rule.tag_id, rule.device_id, rule.project_id, rule.user_id,
+                    currentValue, threshold, rule.condition_type, rule.severity || 'warning',
+                    rule.message || `${rule.rule_name}: ${currentValue} ${rule.condition_type} ${threshold}`
+                ]);
+
+                alarmEvents.push({
+                    type: 'triggered',
+                    event: eventResult.rows[0],
+                    rule: rule,
+                    measurement: measurement
+                });
+
+                console.log(`🚨 Alarm triggered: ${rule.rule_name} (${currentValue} ${rule.condition_type} ${threshold})`);
+
+            } else if (!conditionMet && currentState) {
+                // ALARM CLEARED
+
+                // Remove alarm state completely when condition clears
+                await client.query(`DELETE FROM alarm_states WHERE rule_id = $1`, [rule.id]);
+
+                // Create cleared event
+                await client.query(`
+                    INSERT INTO alarm_events (
+                        rule_id, tag_id, device_id, project_id, user_id,
+                        event_type, trigger_value, threshold_value, condition_type,
+                        severity, message, cleared_at, created_at
+                    ) VALUES ($1, $2, $3, $4, $5, 'cleared', $6, $7, $8, $9, $10, NOW(), NOW())
+                `, [
+                    rule.id, rule.tag_id, rule.device_id, rule.project_id, rule.user_id,
+                    currentValue, threshold, rule.condition_type, rule.severity || 'warning',
+                    `${rule.rule_name}: CLEARED - ${currentValue} (was ${currentState.state})`
+                ]);
+
+                alarmEvents.push({
+                    type: 'cleared',
+                    rule: rule,
+                    measurement: measurement,
+                    previous_state: currentState.state
+                });
+
+                console.log(`✅ Alarm cleared: ${rule.rule_name} (${currentValue}) - was ${currentState.state}`);
+
+            } else if (conditionMet && currentState && currentState.state === 'acknowledged') {
+                // If condition is STILL met but alarm was acknowledged,
+                // DON'T re-trigger immediately - maintain acknowledged state
+                console.log(`⚠️ Acknowledged alarm condition still met: ${rule.rule_name} (${currentValue})`);
+
+                // Optionally update the trigger value to show current reading
+                await client.query(`
+                    UPDATE alarm_states 
+                    SET trigger_value = $1, triggered_at = NOW()
+                    WHERE rule_id = $2
+                `, [currentValue, rule.id]);
+            }
+        }
+
+        await client.query('COMMIT');
+
+        // Send WebSocket updates for affected projects
+        if (alarmEvents.length > 0 && global.wsManager) {
+            const projectIds = [...new Set(alarmEvents.map(e => e.rule.project_id))];
+            for (const projectId of projectIds) {
+                try {
+                    // Send individual alarm events
+                    for (const alarmEvent of alarmEvents) {
+                        if (alarmEvent.rule.project_id === projectId) {
+                            await global.wsManager.broadcastAlarmEvent(projectId, alarmEvent.type, {
+                                rule: alarmEvent.rule,
+                                measurement: alarmEvent.measurement,
+                                trigger_value: alarmEvent.measurement.value,
+                                threshold: alarmEvent.rule.threshold,
+                                condition: alarmEvent.rule.condition_type
+                            });
+                        }
+                    }
+
+                    // Send updated alarm summary
+                    await global.wsManager.broadcastAlarmSummary(projectId);
+                } catch (wsError) {
+                    console.log('⚠️ WebSocket notification failed:', wsError.message);
+                }
+            }
+        }
+
+        return alarmEvents;
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('❌ Error evaluating alarm conditions:', error);
+        throw error;
+    } finally {
+        client.release();
+    }
+};
+
+const handleRealTimeMeasurements = async (measurements) => {
+    try {
+        const alarmEvents = await evaluateAlarmConditions(measurements);
+        console.log(`📊 Processed ${alarmEvents.length} alarm events from real-time data`);
+        return alarmEvents;
+    } catch (error) {
+        console.error('❌ Error handling real-time measurements for alarms:', error);
+    }
+};
+
+// =============================================================================
+// CLEAN EXPORTS - Single source of truth
+// =============================================================================
 
 console.log('✅ AlarmController: Complete SCADA alarm system loaded successfully');
 
 module.exports = {
+    // Debug Functions
+    debugAlarmState,
+    debugAlarmStates,
+    forceCreateAlarmState,
+
     // Alarm Rules (Configuration)
-    getAlarmRulesByProject: exports.getAlarmRulesByProject,
-    createAlarmRule: exports.createAlarmRule,
-    updateAlarmRule: exports.updateAlarmRule,
-    deleteAlarmRule: exports.deleteAlarmRule,
+    getAlarmRulesByProject,
+    createAlarmRule,
+    updateAlarmRule,
+    deleteAlarmRule,
 
     // Active Alarms (Current State)
-    getActiveAlarms: exports.getActiveAlarms,
-    acknowledgeAlarm: exports.acknowledgeAlarm,
+    getActiveAlarms,
+    acknowledgeAlarm,
 
     // Alarm Events (History)
-    getAlarmEvents: exports.getAlarmEvents,
-
-    // Real-time Evaluation
-    evaluateAlarmConditions: exports.evaluateAlarmConditions,
-    handleRealTimeMeasurements: exports.handleRealTimeMeasurements,
+    getAlarmEvents,
 
     // Statistics
-    getProjectAlarmStats: exports.getProjectAlarmStats,
+    getProjectAlarmStats,
+
+    // Real-time Evaluation
+    evaluateAlarmConditions,
+    handleRealTimeMeasurements,
 
     // Legacy Compatibility
-    getAlarms: exports.getAlarms,
-    createAlarm: exports.createAlarm
+    getAlarms: getAlarmRulesByProject,  // Alias for backward compatibility
+    createAlarm: createAlarmRule        // Alias for backward compatibility
 };
