@@ -1,4 +1,4 @@
-// src/pages/TagsPage.js - Enhanced Independent Project-Level SCADA Tags with Database Optimizations
+// src/pages/TagsPage.js - Fixed Version with Project-Level API
 import React, { useEffect, useState } from 'react';
 import {
     Grid, Paper, Box, Typography, IconButton, Tooltip, Chip, Fab, Dialog,
@@ -34,13 +34,9 @@ import {
     Refresh as RefreshIcon,
     ArrowBack as ArrowBackIcon,
     Lock as LockIcon,
-    Scale as ScaleIcon,
-    Devices as DevicesIcon,
-    HealthAndSafety as HealthIcon,
-    Analytics as AnalyticsIcon,
-    DataUsage as DataIcon
+    Scale as ScaleIcon
 } from '@mui/icons-material';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
 import axios from '../api/axios';
 import { motion } from 'framer-motion';
@@ -55,34 +51,35 @@ const pulse = keyframes`
 
 export default function TagsPage() {
     const { projectId } = useParams();
+    const location = useLocation();
+    const searchParams = new URLSearchParams(location.search);
+    const deviceId = searchParams.get('device');
     const navigate = useNavigate();
     const { isDark } = useTheme();
 
     // WebSocket real-time data
     const { measurements, isConnected, getTagValue, getTagTimestamp } = useRealTimeData(projectId);
 
-    // Main state
+    // State
     const [tags, setTags] = useState([]);
     const [filtered, setFiltered] = useState([]);
-    const [devices, setDevices] = useState([]); // Available devices for tag creation
-    const [projectStats, setProjectStats] = useState(null);
     const [search, setSearch] = useState('');
     const [addOpen, setAddOpen] = useState(false);
     const [editOpen, setEditOpen] = useState(false);
     const [deleteOpen, setDeleteOpen] = useState(false);
     const [snackbar, setSnackbar] = useState({ open: false, msg: '', severity: 'success' });
     const [current, setCurrent] = useState(null);
+    const [device, setDevice] = useState(null);
     const [groupBy, setGroupBy] = useState('none');
+    const [simulationStatus, setSimulationStatus] = useState(null);
     const [loading, setLoading] = useState(false);
+    const [error, setError] = useState(null);
 
-    // Enhanced state for database optimizations
-    const [tagStats, setTagStats] = useState({});
-    const [latestMeasurements, setLatestMeasurements] = useState({});
-    const [tagHealthData, setTagHealthData] = useState({});
-    const [lastRefresh, setLastRefresh] = useState(null);
+    // State for devices list (for device selection in modal)
+    const [devices, setDevices] = useState([]);
+    const [selectedDeviceId, setSelectedDeviceId] = useState('');
 
-    // Form state
-    const [selectedDeviceId, setSelectedDeviceId] = useState(''); // Device selection for new tags
+    // Basic tag form state
     const [tagName, setTagName] = useState('');
     const [tagType, setTagType] = useState('analog');
     const [address, setAddress] = useState('');
@@ -150,220 +147,14 @@ export default function TagsPage() {
         { value: 'vibration', label: 'Vibration', description: 'Vibration for predictive maintenance' }
     ];
 
-    // Debug: Add axios interceptors
+    // Debug: Log URL parameters
     useEffect(() => {
-        console.log('🔧 Enhanced Independent Tags Page - Project Level with Database Optimizations');
-        console.log('🔧 Axios base URL:', axios.defaults.baseURL);
-        console.log('🔧 Project ID:', projectId);
-
-        const requestInterceptor = axios.interceptors.request.use(
-            (config) => {
-                console.log('📤 API Request:', config.method?.toUpperCase(), config.url, config.data);
-                return config;
-            },
-            (error) => {
-                console.error('📤 Request Error:', error);
-                return Promise.reject(error);
-            }
-        );
-
-        const responseInterceptor = axios.interceptors.response.use(
-            (response) => {
-                console.log('📥 API Response:', response.status, response.config.url, response.data);
-                return response;
-            },
-            (error) => {
-                console.error('📥 Response Error:', error.response?.status, error.response?.data);
-                return Promise.reject(error);
-            }
-        );
-
-        return () => {
-            axios.interceptors.request.eject(requestInterceptor);
-            axios.interceptors.response.eject(responseInterceptor);
-        };
-    }, []);
-
-    // ============================================================================
-    // ENHANCED API FUNCTIONS (Using new database endpoints)
-    // ============================================================================
-
-    // Fetch enhanced tag statistics (uses database view)
-    const fetchTagStatistics = async () => {
-        if (!projectId) return;
-
-        try {
-            console.log('📊 Fetching enhanced tag statistics...');
-            const response = await axios.get(`/tags/project/${projectId}/statistics`);
-
-            console.log('✅ Tag statistics fetched:', response.data);
-            setTagStats(response.data.statistics || {});
-
-        } catch (err) {
-            console.error('❌ Failed to fetch tag statistics:', err);
-            // Don't show error for statistics as it's not critical
-        }
-    };
-
-    // Fetch latest measurements for all tags (uses database view)
-    const fetchLatestMeasurements = async () => {
-        if (!projectId) return;
-
-        try {
-            console.log('📈 Fetching latest measurements...');
-            const response = await axios.get(`/tags/project/${projectId}/latest`);
-
-            console.log('✅ Latest measurements fetched:', response.data);
-            setLatestMeasurements(response.data.latest_measurements || {});
-            setLastRefresh(new Date());
-
-        } catch (err) {
-            console.error('❌ Failed to fetch latest measurements:', err);
-            // Don't show error for latest measurements as it's called frequently
-        }
-    };
-
-    // Fetch health status for specific tag
-    const fetchTagHealth = async (tagId) => {
-        if (!projectId || !tagId) return null;
-
-        try {
-            console.log(`🏥 Fetching health for tag ${tagId}...`);
-            const response = await axios.get(`/tags/project/${projectId}/${tagId}/health`);
-
-            console.log('✅ Tag health fetched:', response.data);
-            return response.data.health;
-
-        } catch (err) {
-            console.error('❌ Failed to fetch tag health:', err);
-            return null;
-        }
-    };
-
-    // Fetch historical data for charts
-    const fetchTagHistory = async (tagId, hours = 24, limit = 1000) => {
-        if (!projectId || !tagId) return null;
-
-        try {
-            console.log(`📊 Fetching history for tag ${tagId}...`);
-            const response = await axios.get(
-                `/tags/project/${projectId}/${tagId}/history?hours=${hours}&limit=${limit}`
-            );
-
-            console.log('✅ Tag history fetched:', response.data);
-            return response.data;
-
-        } catch (err) {
-            console.error('❌ Failed to fetch tag history:', err);
-            return null;
-        }
-    };
-
-    // Enhanced fetch all data function
-    const fetchAllEnhancedData = async () => {
-        if (!projectId) return;
-
-        setLoading(true);
-
-        try {
-            // Fetch all data in parallel for better performance
-            await Promise.all([
-                fetchProjectTags(),           // Your existing function
-                fetchProjectDevices(),        // Your existing function
-                fetchProjectStats(),          // Your existing function
-                fetchTagStatistics(),         // New enhanced statistics
-                fetchLatestMeasurements()     // New latest values
-            ]);
-
-        } catch (err) {
-            console.error('❌ Failed to fetch enhanced data:', err);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    // ============================================================================
-    // EXISTING API FUNCTIONS (Updated for better integration)
-    // ============================================================================
-
-    // Fetch all project data on load
-    useEffect(() => {
-        if (projectId) {
-            console.log('🚀 Loading enhanced independent tags for project:', projectId);
-            fetchAllEnhancedData();
-
-            // Set up periodic refresh for latest measurements (every 30 seconds)
-            const refreshInterval = setInterval(() => {
-                fetchLatestMeasurements();
-            }, 30000);
-
-            return () => clearInterval(refreshInterval);
-        }
-    }, [projectId]);
-
-    // Fetch all tags for the project
-    const fetchProjectTags = async () => {
-        try {
-            console.log('📤 Fetching all project tags...');
-            const response = await axios.get(`/tags/project/${projectId}`);
-            console.log('✅ Project tags fetched:', response.data.length, 'tags');
-            setTags(response.data);
-            setFiltered(response.data);
-        } catch (err) {
-            console.error('❌ Failed to fetch project tags:', err);
-            setSnackbar({
-                open: true,
-                msg: `❌ Failed to load tags: ${err.response?.data?.error || err.message}`,
-                severity: 'error'
-            });
-        }
-    };
-
-    // Fetch available devices for tag creation
-    const fetchProjectDevices = async () => {
-        try {
-            console.log('📤 Fetching project devices...');
-            const response = await axios.get(`/tags/project/${projectId}/devices`);
-            console.log('✅ Project devices fetched:', response.data.length, 'devices');
-            setDevices(response.data);
-
-            // Auto-select first device if available
-            if (response.data.length > 0 && !selectedDeviceId) {
-                setSelectedDeviceId(response.data[0].device_id.toString());
-            }
-        } catch (err) {
-            console.error('❌ Failed to fetch project devices:', err);
-        }
-    };
-
-    // Fetch project tag statistics
-    const fetchProjectStats = async () => {
-        try {
-            const response = await axios.get(`/tags/project/${projectId}/stats`);
-            console.log('✅ Project stats fetched:', response.data);
-            setProjectStats(response.data);
-        } catch (err) {
-            console.error('ℹ️ Project stats not available:', err.message);
-        }
-    };
-
-    // Filter tags based on search
-    useEffect(() => {
-        if (!search) {
-            setFiltered(tags);
-        } else {
-            setFiltered(
-                tags.filter(t =>
-                    t.tag_name.toLowerCase().includes(search.toLowerCase()) ||
-                    (t.tag_type && t.tag_type.toLowerCase().includes(search.toLowerCase())) ||
-                    (t.address && t.address.toLowerCase().includes(search.toLowerCase())) ||
-                    (t.tag_group && t.tag_group.toLowerCase().includes(search.toLowerCase())) ||
-                    (t.engineering_unit && t.engineering_unit.toLowerCase().includes(search.toLowerCase())) ||
-                    (t.device_name && t.device_name.toLowerCase().includes(search.toLowerCase()))
-                )
-            );
-        }
-    }, [search, tags]);
+        console.log('=== TAGS PAGE DEBUG ===');
+        console.log('📍 Current URL:', window.location.href);
+        console.log('📍 Project ID:', projectId);
+        console.log('📍 Device ID from URL:', deviceId);
+        console.log('📍 Full search params:', location.search);
+    }, [projectId, deviceId, location.search]);
 
     // Get simulation suggestions based on tag name
     const getSimulationSuggestions = (tagName) => {
@@ -449,6 +240,120 @@ export default function TagsPage() {
         return typeof value === 'number' ? value.toFixed(2) : value.toString();
     };
 
+    // FIXED: Fetch all project tags instead of device-specific
+    const fetchTags = () => {
+        if (!projectId) {
+            console.error('❌ Cannot fetch tags: no projectId');
+            return;
+        }
+
+        console.log('📤 Fetching all tags for project:', projectId);
+        setLoading(true);
+
+        // 🔧 FIXED: Use project-level endpoint
+        axios.get(`/tags/project/${projectId}`)
+            .then(res => {
+                console.log('✅ Tags fetched:', res.data);
+                setTags(res.data);
+                setFiltered(res.data);
+                setError(null);
+            })
+            .catch(err => {
+                console.error('❌ Failed to fetch tags:', err);
+                setError(err.response?.data?.error || err.message);
+                setSnackbar({
+                    open: true,
+                    msg: `❌ Failed to load tags: ${err.response?.data?.error || err.message}`,
+                    severity: 'error'
+                });
+            })
+            .finally(() => {
+                setLoading(false);
+            });
+    };
+
+    // Fetch devices for the add modal
+    const fetchDevices = () => {
+        if (!projectId) return;
+
+        console.log('📤 Fetching devices for project:', projectId);
+        axios.get(`/tags/project/${projectId}/devices`)
+            .then(res => {
+                console.log('✅ Devices fetched:', res.data);
+                setDevices(res.data);
+            })
+            .catch(err => {
+                console.error('❌ Failed to fetch devices:', err);
+            });
+    };
+
+    const fetchDeviceInfo = () => {
+        if (!deviceId) return;
+        console.log('📤 Fetching device info for:', deviceId);
+        axios.get(`/devices/${deviceId}`)
+            .then(res => {
+                console.log('✅ Device info fetched:', res.data);
+                setDevice(res.data);
+            })
+            .catch(err => {
+                console.error('❌ Failed to fetch device info:', err);
+            });
+    };
+
+    const fetchSimulationStatus = () => {
+        if (!deviceId) return;
+        console.log('📤 Fetching simulation status for:', deviceId);
+
+        axios.get(`/devices/${deviceId}/simulation/status`)
+            .then(res => {
+                console.log('✅ Simulation status fetched:', res.data);
+                setSimulationStatus(res.data);
+            })
+            .catch(err => {
+                console.log('ℹ️ Simulation status not available:', err.message);
+            });
+    };
+
+    // Fetch data on component mount
+    useEffect(() => {
+        console.log('📍 useEffect triggered - projectId:', projectId, 'deviceId:', deviceId);
+
+        if (projectId) {
+            console.log('✅ Project ID found, fetching data...');
+            fetchTags(); // Always fetch all project tags
+            fetchDevices(); // Fetch devices for the modal
+
+            // Also fetch device info if deviceId is in URL (for backward compatibility)
+            if (deviceId) {
+                fetchDeviceInfo();
+                fetchSimulationStatus();
+            }
+        } else {
+            console.error('❌ No project ID found!');
+            setSnackbar({
+                open: true,
+                msg: '❌ No project selected.',
+                severity: 'error'
+            });
+        }
+    }, [projectId, deviceId]);
+
+    useEffect(() => {
+        if (!search) {
+            setFiltered(tags);
+        } else {
+            setFiltered(
+                tags.filter(t =>
+                    t.tag_name.toLowerCase().includes(search.toLowerCase()) ||
+                    (t.tag_type && t.tag_type.toLowerCase().includes(search.toLowerCase())) ||
+                    (t.address && t.address.toLowerCase().includes(search.toLowerCase())) ||
+                    (t.tag_group && t.tag_group.toLowerCase().includes(search.toLowerCase())) ||
+                    (t.engineering_unit && t.engineering_unit.toLowerCase().includes(search.toLowerCase()))
+                )
+            );
+        }
+    }, [search, tags]);
+
     // Group tags for better organization
     const getGroupedTags = () => {
         if (groupBy === 'type') {
@@ -475,9 +380,9 @@ export default function TagsPage() {
         } else if (groupBy === 'device') {
             const grouped = {};
             filtered.forEach(tag => {
-                const device = tag.device_name || 'unknown';
-                if (!grouped[device]) grouped[device] = [];
-                grouped[device].push(tag);
+                const deviceName = tag.device_name || 'Unknown Device';
+                if (!grouped[deviceName]) grouped[deviceName] = [];
+                grouped[deviceName].push(tag);
             });
             return grouped;
         }
@@ -489,34 +394,48 @@ export default function TagsPage() {
         setTagName(''); setTagType('analog'); setAddress(''); setUpdateInterval('1000');
         setSimulation(false); setSimulationMin('0'); setSimulationMax('100');
         setSimulationNoise('0'); setSimulationPattern('random');
-        // Reset professional fields
+        // Add new professional fields
         setTagGroup(''); setDataType('FLOAT'); setEngineeringUnit('');
         setRawMin(''); setRawMax(''); setScaledMin(''); setScaledMax('');
         setDeadband(''); setReadOnly(false); setDescription('');
-        // Keep device selection unless no devices available
-        if (devices.length === 0) {
-            setSelectedDeviceId('');
-        }
+        // Reset device selection
+        setSelectedDeviceId('');
     };
 
-    // Enhanced create handler with device selection
-    const handleAdd = async () => {
-        console.log('=== DEBUG CREATE TAG (PROJECT-LEVEL) ===');
-        console.log('projectId:', projectId);
-        console.log('selectedDeviceId:', selectedDeviceId);
+    // FIXED: Enhanced handlers with project-level API
+    const handleAdd = () => {
+        console.log('=== DEBUG CREATE TAG ===');
         console.log('tagName:', tagName);
+        console.log('selectedDeviceId:', selectedDeviceId);
+        console.log('projectId:', projectId);
+        console.log('tagType:', tagType);
+        console.log('simulation:', simulation);
 
-        // Validation
-        if (!selectedDeviceId) {
+        // Check if projectId exists
+        if (!projectId) {
+            console.error('❌ No projectId found!');
             setSnackbar({
                 open: true,
-                msg: '❌ Please select a device for this tag',
+                msg: '❌ No project selected.',
                 severity: 'error'
             });
             return;
         }
 
+        // Check if device is selected
+        if (!selectedDeviceId) {
+            console.error('❌ No device selected');
+            setSnackbar({
+                open: true,
+                msg: '❌ Please select a device first.',
+                severity: 'error'
+            });
+            return;
+        }
+
+        // Check if tagName exists
         if (!tagName || !tagName.trim()) {
+            console.error('❌ Tag name is empty');
             setSnackbar({
                 open: true,
                 msg: '❌ Tag name is required',
@@ -525,157 +444,116 @@ export default function TagsPage() {
             return;
         }
 
-        // Validate numeric ranges
-        if (simulation) {
-            if (simulationMin && simulationMax && parseFloat(simulationMin) >= parseFloat(simulationMax)) {
-                setSnackbar({
-                    open: true,
-                    msg: '❌ Simulation minimum must be less than maximum',
-                    severity: 'error'
-                });
-                return;
-            }
-        }
-
-        if (rawMin && rawMax && parseFloat(rawMin) >= parseFloat(rawMax)) {
-            setSnackbar({
-                open: true,
-                msg: '❌ Raw minimum must be less than raw maximum',
-                severity: 'error'
-            });
-            return;
-        }
-
-        if (scaledMin && scaledMax && parseFloat(scaledMin) >= parseFloat(scaledMax)) {
-            setSnackbar({
-                open: true,
-                msg: '❌ Scaled minimum must be less than scaled maximum',
-                severity: 'error'
-            });
-            return;
-        }
-
         const tagData = {
-            device_id: parseInt(selectedDeviceId), // Include device selection
-            tag_name: tagName.trim(),
-            tag_type: tagType || 'analog',
-            address: address.trim() || null,
-            update_interval: updateInterval && !isNaN(updateInterval) ? parseInt(updateInterval) : 1000,
-            simulation: Boolean(simulation),
-            simulation_min: simulation && simulationMin && !isNaN(simulationMin) ? parseFloat(simulationMin) : null,
-            simulation_max: simulation && simulationMax && !isNaN(simulationMax) ? parseFloat(simulationMax) : null,
-            simulation_noise: simulation && simulationNoise && !isNaN(simulationNoise) ? parseFloat(simulationNoise) : null,
-            simulation_pattern: simulation && simulationPattern ? simulationPattern : null,
-            // Enhanced professional fields
-            tag_group: tagGroup.trim() || null,
-            data_type: dataType || 'FLOAT',
-            engineering_unit: engineeringUnit.trim() || null,
-            raw_min: rawMin && !isNaN(rawMin) ? parseFloat(rawMin) : null,
-            raw_max: rawMax && !isNaN(rawMax) ? parseFloat(rawMax) : null,
-            scaled_min: scaledMin && !isNaN(scaledMin) ? parseFloat(scaledMin) : null,
-            scaled_max: scaledMax && !isNaN(scaledMax) ? parseFloat(scaledMax) : null,
-            deadband: deadband && !isNaN(deadband) ? parseFloat(deadband) : null,
-            read_only: Boolean(readOnly),
-            description: description.trim() || null
-        };
-
-        console.log('📤 Sending project-level tag creation request:');
-        console.log('URL:', `/tags/project/${projectId}`);
-        console.log('Data:', tagData);
-
-        try {
-            const response = await axios.post(`/tags/project/${projectId}`, tagData);
-            console.log('✅ Tag created successfully:', response.data);
-
-            setAddOpen(false);
-            resetForm();
-            setSnackbar({
-                open: true,
-                msg: `✅ ${simulation ? 'Simulation' : 'Real'} tag "${tagName}" created successfully!`,
-                severity: 'success'
-            });
-
-            // Refresh all data including enhanced statistics
-            await fetchAllEnhancedData();
-        } catch (err) {
-            console.error('❌ Failed to create tag:', err);
-            let errorMessage = 'Failed to create tag';
-            if (err.response?.data?.error) {
-                errorMessage = err.response.data.error;
-            } else if (err.response?.status === 401) {
-                errorMessage = 'Authentication required. Please log in again.';
-            } else if (err.response?.status === 403) {
-                errorMessage = 'Permission denied.';
-            } else if (err.response?.status === 404) {
-                errorMessage = 'Project or device not found.';
-            } else if (err.message) {
-                errorMessage = err.message;
-            }
-
-            setSnackbar({
-                open: true,
-                msg: `❌ ${errorMessage}`,
-                severity: 'error'
-            });
-        }
-    };
-
-    const handleEdit = async () => {
-        if (!current || !tagName) return;
-
-        const tagData = {
-            tag_name: tagName.trim(),
+            device_id: parseInt(selectedDeviceId), // Device selection
+            tag_name: tagName,
             tag_type: tagType,
-            address: address.trim() || null,
+            address,
             update_interval: updateInterval ? parseInt(updateInterval) : null,
             simulation,
             simulation_min: simulation && simulationMin ? parseFloat(simulationMin) : null,
             simulation_max: simulation && simulationMax ? parseFloat(simulationMax) : null,
             simulation_noise: simulation && simulationNoise ? parseFloat(simulationNoise) : null,
             simulation_pattern: simulation ? simulationPattern : null,
-            // Professional fields
-            tag_group: tagGroup.trim() || null,
+            // Add new professional fields
+            tag_group: tagGroup || null,
             data_type: dataType,
-            engineering_unit: engineeringUnit.trim() || null,
+            engineering_unit: engineeringUnit || null,
             raw_min: rawMin ? parseFloat(rawMin) : null,
             raw_max: rawMax ? parseFloat(rawMax) : null,
             scaled_min: scaledMin ? parseFloat(scaledMin) : null,
             scaled_max: scaledMax ? parseFloat(scaledMax) : null,
             deadband: deadband ? parseFloat(deadband) : null,
             read_only: readOnly,
-            description: description.trim() || null
+            description: description || null
         };
 
-        try {
-            await axios.put(`/tags/project/${projectId}/${current.tag_id}`, tagData);
-            setEditOpen(false);
-            resetForm();
-            setSnackbar({ open: true, msg: 'Tag updated successfully!', severity: 'success' });
-            await fetchAllEnhancedData();
-        } catch (err) {
-            setSnackbar({
+        console.log('📤 Sending API request:');
+        console.log('URL:', `/tags/project/${projectId}`);
+        console.log('Data:', tagData);
+
+        // 🔧 FIXED: Use project-level API
+        axios.post(`/tags/project/${projectId}`, tagData)
+            .then((response) => {
+                console.log('✅ API Success:', response.data);
+                setAddOpen(false);
+                resetForm();
+                setSnackbar({
+                    open: true,
+                    msg: `✅ ${simulation ? 'Simulation' : 'Real'} tag "${tagName}" created successfully!`,
+                    severity: 'success'
+                });
+                fetchTags();
+            })
+            .catch((err) => {
+                console.error('❌ API Error:', err);
+                console.error('❌ Error Response:', err.response?.data);
+                console.error('❌ Error Status:', err.response?.status);
+
+                setSnackbar({
+                    open: true,
+                    msg: `❌ ${err.response?.data?.error || err.message || 'Failed to create tag'}`,
+                    severity: 'error'
+                });
+            });
+    };
+
+    const handleEdit = () => {
+        if (!current || !tagName) return;
+
+        const tagData = {
+            tag_name: tagName,
+            tag_type: tagType,
+            address,
+            update_interval: updateInterval ? parseInt(updateInterval) : null,
+            simulation,
+            simulation_min: simulation && simulationMin ? parseFloat(simulationMin) : null,
+            simulation_max: simulation && simulationMax ? parseFloat(simulationMax) : null,
+            simulation_noise: simulation && simulationNoise ? parseFloat(simulationNoise) : null,
+            simulation_pattern: simulation ? simulationPattern : null,
+            // Add new professional fields
+            tag_group: tagGroup || null,
+            data_type: dataType,
+            engineering_unit: engineeringUnit || null,
+            raw_min: rawMin ? parseFloat(rawMin) : null,
+            raw_max: rawMax ? parseFloat(rawMax) : null,
+            scaled_min: scaledMin ? parseFloat(scaledMin) : null,
+            scaled_max: scaledMax ? parseFloat(scaledMax) : null,
+            deadband: deadband ? parseFloat(deadband) : null,
+            read_only: readOnly,
+            description: description || null
+        };
+
+        // 🔧 FIXED: Use project-level API
+        axios.put(`/tags/project/${projectId}/${current.tag_id}`, tagData)
+            .then(() => {
+                setEditOpen(false);
+                resetForm();
+                setSnackbar({ open: true, msg: 'Tag updated successfully!', severity: 'success' });
+                fetchTags();
+            })
+            .catch(err => setSnackbar({
                 open: true,
                 msg: err.response?.data?.error || 'Failed to update tag',
                 severity: 'error'
-            });
-        }
+            }));
     };
 
-    const handleDelete = async () => {
+    const handleDelete = () => {
         if (!current) return;
 
-        try {
-            await axios.delete(`/tags/project/${projectId}/${current.tag_id}`);
-            setDeleteOpen(false);
-            setSnackbar({ open: true, msg: 'Tag deleted successfully!', severity: 'success' });
-            await fetchAllEnhancedData();
-        } catch (err) {
-            setSnackbar({
+        // 🔧 FIXED: Use project-level API
+        axios.delete(`/tags/project/${projectId}/${current.tag_id}`)
+            .then(() => {
+                setDeleteOpen(false);
+                setSnackbar({ open: true, msg: 'Tag deleted successfully!', severity: 'success' });
+                fetchTags();
+            })
+            .catch(err => setSnackbar({
                 open: true,
                 msg: err.response?.data?.error || 'Failed to delete tag',
                 severity: 'error'
-            });
-        }
+            }));
     };
 
     // Enhanced openEdit function with all new fields
@@ -690,7 +568,7 @@ export default function TagsPage() {
         setSimulationMax(tag.simulation_max?.toString() || '100');
         setSimulationNoise(tag.simulation_noise?.toString() || '0');
         setSimulationPattern(tag.simulation_pattern || 'random');
-        // Professional fields
+        // Add new professional fields
         setTagGroup(tag.tag_group || '');
         setDataType(tag.data_type || 'FLOAT');
         setEngineeringUnit(tag.engineering_unit || '');
@@ -715,21 +593,26 @@ export default function TagsPage() {
 
     const getQualityStatus = (tagId) => {
         const hasLiveData = getTagValue(tagId) !== undefined;
-        const latestDbData = latestMeasurements[tagId];
-        return hasLiveData || latestDbData ? 'GOOD' : 'BAD';
+        return hasLiveData ? 'GOOD' : 'BAD';
     };
 
-    const getAddressHint = (deviceType) => {
-        switch (deviceType) {
-            case 'modbus':
-                return 'Modbus: 40001 (Holding), 30001 (Input), 1 (Coil), 10001 (Discrete)';
-            case 'mqtt':
-                return 'MQTT: topic/path/sensor1';
-            case 'simulation':
-                return 'Simulation: any identifier';
-            default:
-                return 'Device-specific address format';
+    const getAddressHint = () => {
+        if (selectedDeviceId) {
+            const selectedDevice = devices.find(d => d.device_id == selectedDeviceId);
+            if (selectedDevice) {
+                switch (selectedDevice.device_type) {
+                    case 'modbus':
+                        return 'Modbus: 40001 (Holding), 30001 (Input), 1 (Coil), 10001 (Discrete)';
+                    case 'mqtt':
+                        return 'MQTT: topic/path/sensor1';
+                    case 'simulation':
+                        return 'Simulation: any identifier';
+                    default:
+                        return 'Device-specific address format';
+                }
+            }
         }
+        return 'Select a device first to see address format hints';
     };
 
     const handleTagNameChange = (newTagName) => {
@@ -740,117 +623,161 @@ export default function TagsPage() {
             setSimulationMin(suggestions.min.toString());
             setSimulationMax(suggestions.max.toString());
             setSimulationPattern(suggestions.pattern);
+            // Auto-suggest engineering unit
             if (suggestions.units !== 'units') {
                 setEngineeringUnit(suggestions.units);
             }
         }
     };
 
-    // Get selected device info
-    const getSelectedDevice = () => {
-        return devices.find(d => d.device_id.toString() === selectedDeviceId);
+    // Enhanced tag info rendering with professional fields
+    const renderEnhancedTagInfo = (tag) => (
+        <Box sx={{ mb: 2 }}>
+            <Stack direction="row" spacing={1} sx={{ mb: 2, flexWrap: 'wrap' }}>
+                {tag.device_name && (
+                    <Chip
+                        label={`Device: ${tag.device_name}`}
+                        size="small"
+                        color="primary"
+                        sx={{ fontWeight: 600 }}
+                    />
+                )}
+                {tag.tag_group && (
+                    <Chip
+                        label={`Group: ${tag.tag_group}`}
+                        size="small"
+                        color="info"
+                        sx={{ fontWeight: 600 }}
+                    />
+                )}
+                {tag.engineering_unit && (
+                    <Chip
+                        label={`Unit: ${tag.engineering_unit}`}
+                        size="small"
+                        color="success"
+                        sx={{ fontWeight: 600 }}
+                    />
+                )}
+                {tag.read_only && (
+                    <Chip
+                        icon={<LockIcon fontSize="small" />}
+                        label="Read-Only"
+                        size="small"
+                        color="warning"
+                        sx={{ fontWeight: 600 }}
+                    />
+                )}
+                {(tag.raw_min !== null && tag.raw_max !== null) && (
+                    <Chip
+                        icon={<ScaleIcon fontSize="small" />}
+                        label="Scaled"
+                        size="small"
+                        color="secondary"
+                        sx={{ fontWeight: 600 }}
+                    />
+                )}
+            </Stack>
+
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                <strong>Type:</strong> {tag.data_type || 'FLOAT'}
+            </Typography>
+
+            {(tag.raw_min !== null && tag.raw_max !== null) && (
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                    <strong>Scaling:</strong> {tag.raw_min}-{tag.raw_max} → {tag.scaled_min || 0}-{tag.scaled_max || 100} {tag.engineering_unit || ''}
+                </Typography>
+            )}
+
+            {tag.deadband && (
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                    <strong>Deadband:</strong> ±{tag.deadband} {tag.engineering_unit || ''}
+                </Typography>
+            )}
+
+            {tag.description && (
+                <Typography variant="caption" color="text.secondary" sx={{
+                    display: 'block',
+                    fontStyle: 'italic',
+                    mt: 1,
+                    p: 1,
+                    bgcolor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
+                    borderRadius: 1
+                }}>
+                    "{tag.description}"
+                </Typography>
+            )}
+        </Box>
+    );
+
+    // Navigation helper
+    const NavigateToDevicesButton = () => {
+        if (projectId && tags.length === 0 && !loading) {
+            return (
+                <Box sx={{ textAlign: 'center', mt: 4 }}>
+                    <Button
+                        variant="outlined"
+                        startIcon={<ArrowBackIcon />}
+                        onClick={() => navigate(`/project/${projectId}/devices`)}
+                    >
+                        Go to Devices to Create Tags
+                    </Button>
+                </Box>
+            );
+        }
+        return null;
     };
 
-    // Enhanced tag info rendering with device name and database statistics
-    const renderEnhancedTagInfo = (tag) => {
-        const stats = tagStats[tag.tag_id] || {};
+    // Render simulation status panel
+    const renderSimulationPanel = () => {
+        if (!device || device.device_type !== 'simulation') return null;
 
         return (
-            <Box sx={{ mb: 2 }}>
-                <Stack direction="row" spacing={1} sx={{ mb: 2, flexWrap: 'wrap' }}>
-                    {tag.device_name && (
+            <Paper sx={{
+                p: 3,
+                mb: 3,
+                background: isDark
+                    ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+                border: isDark ? '1px solid #475569' : '1px solid #e2e8f0'
+            }}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                    <Typography variant="h6" sx={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 1 }}>
+                        🎯 Industrial Simulation Control
+                    </Typography>
+                    <IconButton size="small" onClick={fetchSimulationStatus}>
+                        <RefreshIcon />
+                    </IconButton>
+                </Box>
+
+                {simulationStatus?.running ? (
+                    <Box>
                         <Chip
-                            icon={<DevicesIcon fontSize="small" />}
-                            label={tag.device_name}
-                            size="small"
-                            color="primary"
-                            sx={{ fontWeight: 600 }}
-                        />
-                    )}
-                    {tag.tag_group && (
-                        <Chip
-                            label={`Group: ${tag.tag_group}`}
-                            size="small"
-                            color="info"
-                            sx={{ fontWeight: 600 }}
-                        />
-                    )}
-                    {tag.engineering_unit && (
-                        <Chip
-                            label={`Unit: ${tag.engineering_unit}`}
-                            size="small"
+                            icon={<CheckCircleIcon />}
+                            label={`Running - ${simulationStatus.tags_count} Tags`}
                             color="success"
-                            sx={{ fontWeight: 600 }}
+                            sx={{ mb: 2, fontWeight: 600 }}
                         />
-                    )}
-                    {tag.read_only && (
+                        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                            Started: {new Date(simulationStatus.started_at).toLocaleString()}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                            Patterns: {simulationStatus.patterns?.join(', ') || 'Standard simulation'}
+                        </Typography>
+                    </Box>
+                ) : (
+                    <Box>
                         <Chip
-                            icon={<LockIcon fontSize="small" />}
-                            label="Read-Only"
-                            size="small"
-                            color="warning"
-                            sx={{ fontWeight: 600 }}
+                            icon={<CircleIcon />}
+                            label="Simulation Stopped"
+                            color="default"
+                            sx={{ mb: 2, fontWeight: 600 }}
                         />
-                    )}
-                    {(tag.raw_min !== null && tag.raw_max !== null) && (
-                        <Chip
-                            icon={<ScaleIcon fontSize="small" />}
-                            label="Scaled"
-                            size="small"
-                            color="secondary"
-                            sx={{ fontWeight: 600 }}
-                        />
-                    )}
-                    {/* Enhanced Quality Indicator from Database */}
-                    {stats.quality_percentage !== undefined && (
-                        <Chip
-                            icon={<DataIcon fontSize="small" />}
-                            label={`${Math.round(stats.quality_percentage)}% Quality`}
-                            size="small"
-                            color={stats.quality_percentage > 90 ? 'success' :
-                                stats.quality_percentage > 70 ? 'warning' : 'error'}
-                            sx={{ fontWeight: 600 }}
-                        />
-                    )}
-                </Stack>
-
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                    <strong>Type:</strong> {tag.data_type || 'FLOAT'} | <strong>Device:</strong> {tag.device_name}
-                </Typography>
-
-                {/* Database Statistics Display */}
-                {stats.measurements_count > 0 && (
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                        <strong>24h Stats:</strong> {stats.measurements_count} measurements,
-                        Avg: {stats.avg_value ? Number(stats.avg_value).toFixed(2) : 'N/A'} {tag.engineering_unit || ''}
-                    </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                            Ready to generate industrial data with realistic patterns
+                        </Typography>
+                    </Box>
                 )}
-
-                {(tag.raw_min !== null && tag.raw_max !== null) && (
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                        <strong>Scaling:</strong> {tag.raw_min}-{tag.raw_max} → {tag.scaled_min || 0}-{tag.scaled_max || 100} {tag.engineering_unit || ''}
-                    </Typography>
-                )}
-
-                {tag.deadband && (
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                        <strong>Deadband:</strong> ±{tag.deadband} {tag.engineering_unit || ''}
-                    </Typography>
-                )}
-
-                {tag.description && (
-                    <Typography variant="caption" color="text.secondary" sx={{
-                        display: 'block',
-                        fontStyle: 'italic',
-                        mt: 1,
-                        p: 1,
-                        bgcolor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
-                        borderRadius: 1
-                    }}>
-                        "{tag.description}"
-                    </Typography>
-                )}
-            </Box>
+            </Paper>
         );
     };
 
@@ -884,60 +811,6 @@ export default function TagsPage() {
         );
     };
 
-    // Enhanced Database Statistics Panel
-    const renderDatabaseStatistics = (tag) => {
-        const stats = tagStats[tag.tag_id];
-
-        if (!stats || stats.measurements_count === 0) return null;
-
-        return (
-            <Box sx={{
-                p: 2,
-                borderRadius: 2,
-                background: isDark ? 'rgba(59, 130, 246, 0.1)' : 'rgba(59, 130, 246, 0.05)',
-                border: '1px solid rgba(59, 130, 246, 0.3)',
-                mb: 2
-            }}>
-                <Typography variant="caption" sx={{ fontWeight: 600, color: 'primary.main', mb: 1, display: 'block' }}>
-                    📊 24h Database Statistics
-                </Typography>
-                <Grid container spacing={1}>
-                    <Grid item xs={6}>
-                        <Typography variant="caption" color="text.secondary">
-                            Measurements: {stats.measurements_count}
-                        </Typography>
-                    </Grid>
-                    <Grid item xs={6}>
-                        <Typography variant="caption" color="text.secondary">
-                            Quality: {Math.round(stats.quality_percentage || 0)}%
-                        </Typography>
-                    </Grid>
-                    {stats.avg_value !== null && (
-                        <>
-                            <Grid item xs={6}>
-                                <Typography variant="caption" color="text.secondary">
-                                    Avg: {Number(stats.avg_value).toFixed(2)} {tag.engineering_unit}
-                                </Typography>
-                            </Grid>
-                            <Grid item xs={6}>
-                                <Typography variant="caption" color="text.secondary">
-                                    Range: {Number(stats.min_value).toFixed(1)}-{Number(stats.max_value).toFixed(1)}
-                                </Typography>
-                            </Grid>
-                        </>
-                    )}
-                    {stats.last_measurement && (
-                        <Grid item xs={12}>
-                            <Typography variant="caption" color="text.secondary">
-                                Last DB Update: {new Date(stats.last_measurement).toLocaleString()}
-                            </Typography>
-                        </Grid>
-                    )}
-                </Grid>
-            </Box>
-        );
-    };
-
     // Render grouped tags
     const renderTagGroup = (groupName, groupTags) => {
         if (groupBy === 'none') {
@@ -955,7 +828,7 @@ export default function TagsPage() {
                     <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                             <Typography variant="h6" sx={{ fontWeight: 600, textTransform: 'capitalize' }}>
-                                {groupName} {groupBy === 'device' ? 'Device' : 'Tags'}
+                                {groupName} Tags
                             </Typography>
                             <Chip label={groupTags.length} size="small" color="primary" />
                         </Box>
@@ -974,20 +847,11 @@ export default function TagsPage() {
         const realTimeValue = getTagValue(tag.tag_id);
         const lastUpdate = getTagTimestamp(tag.tag_id);
         const hasLiveData = realTimeValue !== undefined;
-
-        // Enhanced: Get database latest value as fallback
-        const latestDbMeasurement = latestMeasurements[tag.tag_id];
-        const displayValue = hasLiveData ? realTimeValue : latestDbMeasurement?.value;
-        const dataSource = hasLiveData ? 'websocket' : latestDbMeasurement ? 'database' : null;
-
         const tagConfig = getTagTypeConfig(tag.tag_type);
         const TagIcon = tagConfig.icon;
         const trend = getValueTrend(tag.tag_id);
         const quality = getQualityStatus(tag.tag_id);
-        const alarm = getAlarmStatus(tag, displayValue);
-
-        // Enhanced: Get database statistics
-        const stats = tagStats[tag.tag_id] || {};
+        const alarm = getAlarmStatus(tag, realTimeValue);
 
         return (
             <Grid item xs={12} sm={6} lg={4} key={tag.tag_id}>
@@ -1005,7 +869,7 @@ export default function TagsPage() {
                         border: alarm ?
                             `2px solid ${alarm.severity === 'error' ? '#ef4444' : '#f59e0b'}` :
                             tag.simulation ? '2px solid #f59e0b' :
-                                (hasLiveData || latestDbMeasurement) ? '2px solid #10b981' :
+                                hasLiveData ? '2px solid #10b981' :
                                     isDark ? '1px solid #475569' : '1px solid #e2e8f0',
                         cursor: 'pointer',
                         transition: 'all 0.3s ease-in-out',
@@ -1041,20 +905,20 @@ export default function TagsPage() {
                         )}
 
                         <CardContent sx={{ p: 3 }}>
-                            {/* Tag Header with Enhanced Status */}
+                            {/* Tag Header with Status */}
                             <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 2, mb: 2 }}>
                                 <Badge
                                     badgeContent={
                                         alarm ? '!' :
-                                            stats.quality_percentage < 80 ? '!' :
+                                            quality === 'BAD' ? '!' :
                                                 tag.simulation ? 'SIM' :
-                                                    (hasLiveData || latestDbMeasurement) ? '●' : ''
+                                                    hasLiveData ? '●' : ''
                                     }
                                     color={
                                         alarm ? alarm.severity :
-                                            stats.quality_percentage < 80 ? 'warning' :
+                                            quality === 'BAD' ? 'error' :
                                                 tag.simulation ? 'warning' :
-                                                    (hasLiveData || latestDbMeasurement) ? 'success' : 'default'
+                                                    hasLiveData ? 'success' : 'default'
                                     }
                                 >
                                     <Avatar sx={{
@@ -1112,11 +976,8 @@ export default function TagsPage() {
                             {/* Simulation Status */}
                             {renderTagSimulationStatus(tag)}
 
-                            {/* Enhanced Database Statistics Panel */}
-                            {renderDatabaseStatistics(tag)}
-
-                            {/* Enhanced Real-Time/Latest Value Display */}
-                            {displayValue !== undefined ? (
+                            {/* Real-Time Value with Quality and Trend */}
+                            {hasLiveData ? (
                                 <Box sx={{
                                     p: 2,
                                     borderRadius: 2,
@@ -1124,32 +985,30 @@ export default function TagsPage() {
                                         (alarm.severity === 'error' ?
                                             'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)' :
                                             'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)') :
-                                        'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                                        quality === 'GOOD'
+                                            ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
+                                            : 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
                                     color: 'white',
                                     mb: 2
                                 }}>
                                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                         <Typography variant="caption" sx={{ opacity: 0.9 }}>
-                                            {hasLiveData ? 'Live WebSocket' : 'Latest Database'}
+                                            Live Value
                                         </Typography>
                                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                                             {trend === 'up' && <TrendingUpIcon fontSize="small" />}
                                             {trend === 'down' && <TrendingDownIcon fontSize="small" />}
                                             {trend === 'flat' && <TrendingFlatIcon fontSize="small" />}
                                             <Typography variant="caption" sx={{ opacity: 0.8 }}>
-                                                {latestDbMeasurement?.quality?.toUpperCase() || quality}
+                                                {quality}
                                             </Typography>
                                         </Box>
                                     </Box>
                                     <Typography variant="h4" sx={{ fontWeight: 800, lineHeight: 1 }}>
-                                        {formatValueWithContext(displayValue, tag)}
+                                        {formatValueWithContext(realTimeValue, tag)}
                                     </Typography>
                                     <Typography variant="caption" sx={{ opacity: 0.8 }}>
-                                        {hasLiveData ?
-                                            (lastUpdate && new Date(lastUpdate).toLocaleTimeString()) :
-                                            (latestDbMeasurement?.timestamp && new Date(latestDbMeasurement.timestamp).toLocaleTimeString())
-                                        }
-                                        {dataSource && ` (${dataSource})`}
+                                        {lastUpdate && new Date(lastUpdate).toLocaleTimeString()}
                                     </Typography>
                                 </Box>
                             ) : (
@@ -1162,13 +1021,8 @@ export default function TagsPage() {
                                     textAlign: 'center'
                                 }}>
                                     <Typography variant="body2" color="text.secondary">
-                                        {tag.simulation ? 'Simulation Ready' : 'No Data Available'}
+                                        {tag.simulation ? 'Simulation Ready' : 'No Live Data'}
                                     </Typography>
-                                    {stats.last_measurement && (
-                                        <Typography variant="caption" color="text.secondary">
-                                            Last seen: {new Date(stats.last_measurement).toLocaleString()}
-                                        </Typography>
-                                    )}
                                 </Box>
                             )}
 
@@ -1191,7 +1045,7 @@ export default function TagsPage() {
                                 )}
                             </Box>
 
-                            {/* Enhanced Action Buttons */}
+                            {/* Action Buttons */}
                             <Box className="tag-actions" sx={{
                                 display: 'flex',
                                 justifyContent: 'space-between',
@@ -1214,29 +1068,6 @@ export default function TagsPage() {
                                             <EditIcon fontSize="small" />
                                         </IconButton>
                                     </Tooltip>
-                                    <Tooltip title="Tag Health">
-                                        <IconButton
-                                            size="small"
-                                            onClick={async (e) => {
-                                                e.stopPropagation();
-                                                const health = await fetchTagHealth(tag.tag_id);
-                                                if (health) {
-                                                    setSnackbar({
-                                                        open: true,
-                                                        msg: `Tag Health: ${health.status} (${health.quality_percentage}% quality)`,
-                                                        severity: health.status === 'HEALTHY' ? 'success' : 'warning'
-                                                    });
-                                                }
-                                            }}
-                                            sx={{
-                                                bgcolor: isDark ? 'rgba(34, 197, 94, 0.1)' : 'success.50',
-                                                color: 'success.main',
-                                                '&:hover': { bgcolor: isDark ? 'rgba(34, 197, 94, 0.2)' : 'success.100' }
-                                            }}
-                                        >
-                                            <HealthIcon fontSize="small" />
-                                        </IconButton>
-                                    </Tooltip>
                                     <Tooltip title="Delete Tag">
                                         <IconButton
                                             size="small"
@@ -1252,10 +1083,10 @@ export default function TagsPage() {
                                     </Tooltip>
                                 </Box>
 
-                                <Tooltip title="View Historical Chart">
+                                <Tooltip title="View Trends">
                                     <IconButton
                                         size="small"
-                                        onClick={async (e) => {
+                                        onClick={e => {
                                             e.stopPropagation();
                                             navigate(`/project/${projectId}/measurements?tag=${tag.tag_id}`);
                                         }}
@@ -1302,10 +1133,10 @@ export default function TagsPage() {
                             WebkitBackgroundClip: 'text',
                             color: 'transparent'
                         }}>
-                            Enhanced SCADA Tags
+                            Professional SCADA Tags
                         </Typography>
                         <Typography variant="body1" color="text.secondary">
-                            Project-level tag management with database optimizations and real-time integration
+                            Configure and monitor ALL industrial data points across all devices in this project
                         </Typography>
                     </Box>
                 </Box>
@@ -1313,31 +1144,21 @@ export default function TagsPage() {
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 2 }}>
                     <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap">
                         <Badge badgeContent={filtered.length} color="primary">
-                            <Chip icon={<LabelIcon />} label="Total Tags" color="primary" sx={{ fontWeight: 600 }} />
+                            <Chip icon={<LabelIcon />} label="Tags" color="primary" sx={{ fontWeight: 600 }} />
                         </Badge>
                         <Chip
                             icon={<CircleIcon sx={{ fontSize: 12 }} />}
-                            label={isConnected ? 'Live WebSocket' : 'Database Only'}
-                            color={isConnected ? 'success' : 'info'}
+                            label={isConnected ? 'Live Data' : 'Offline'}
+                            color={isConnected ? 'success' : 'error'}
                             sx={{ fontWeight: 600 }}
                         />
                         <Badge badgeContent={tags.filter(t => t.simulation).length} color="warning">
                             <Chip icon={<MemoryIcon />} label="Simulation" color="warning" sx={{ fontWeight: 600 }} />
                         </Badge>
-                        <Badge badgeContent={devices.length} color="info">
-                            <Chip icon={<DevicesIcon />} label="Devices" color="info" sx={{ fontWeight: 600 }} />
+                        <Badge badgeContent={tags.filter(t => t.tag_group).length} color="info">
+                            <Chip icon={<EngineeringIcon />} label="Grouped" color="info" sx={{ fontWeight: 600 }} />
                         </Badge>
-                        <Badge badgeContent={Object.keys(tagStats).length} color="secondary">
-                            <Chip icon={<AnalyticsIcon />} label="Statistics" color="secondary" sx={{ fontWeight: 600 }} />
-                        </Badge>
-                        {lastRefresh && (
-                            <Chip
-                                icon={<RefreshIcon />}
-                                label={`Updated ${lastRefresh.toLocaleTimeString()}`}
-                                variant="outlined"
-                                size="small"
-                            />
-                        )}
+                        {loading && <Chip label="Loading..." color="warning" />}
                     </Stack>
 
                     <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
@@ -1355,10 +1176,10 @@ export default function TagsPage() {
                                 label="Group By"
                             >
                                 <MenuItem value="none">No Grouping</MenuItem>
-                                <MenuItem value="device">By Device</MenuItem>
                                 <MenuItem value="type">By Type</MenuItem>
                                 <MenuItem value="simulation">By Source</MenuItem>
                                 <MenuItem value="group">By Tag Group</MenuItem>
+                                <MenuItem value="device">By Device</MenuItem>
                             </Select>
                         </FormControl>
 
@@ -1387,84 +1208,40 @@ export default function TagsPage() {
                 </Box>
             </Box>
 
-            {/* Enhanced Project Statistics Panel */}
-            {projectStats && (
-                <Paper sx={{
-                    p: 3,
-                    mb: 3,
-                    background: isDark
-                        ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
-                        : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
-                    border: isDark ? '1px solid #475569' : '1px solid #e2e8f0'
-                }}>
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                        <Typography variant="h6" sx={{ fontWeight: 600 }}>
-                            📊 Enhanced Project Statistics
-                        </Typography>
-                        <Button
-                            size="small"
-                            startIcon={<RefreshIcon />}
-                            onClick={fetchAllEnhancedData}
-                            disabled={loading}
-                        >
-                            Refresh All Data
-                        </Button>
-                    </Box>
-                    <Grid container spacing={2}>
-                        <Grid item xs={6} sm={3}>
-                            <Box sx={{ textAlign: 'center' }}>
-                                <Typography variant="h4" sx={{ fontWeight: 700, color: 'primary.main' }}>
-                                    {projectStats.summary?.total_tags || 0}
-                                </Typography>
-                                <Typography variant="caption" color="text.secondary">
-                                    Total Tags
-                                </Typography>
-                            </Box>
-                        </Grid>
-                        <Grid item xs={6} sm={3}>
-                            <Box sx={{ textAlign: 'center' }}>
-                                <Typography variant="h4" sx={{ fontWeight: 700, color: 'warning.main' }}>
-                                    {projectStats.summary?.simulation_tags || 0}
-                                </Typography>
-                                <Typography variant="caption" color="text.secondary">
-                                    Simulation
-                                </Typography>
-                            </Box>
-                        </Grid>
-                        <Grid item xs={6} sm={3}>
-                            <Box sx={{ textAlign: 'center' }}>
-                                <Typography variant="h4" sx={{ fontWeight: 700, color: 'success.main' }}>
-                                    {Object.keys(tagStats).length}
-                                </Typography>
-                                <Typography variant="caption" color="text.secondary">
-                                    With DB Stats
-                                </Typography>
-                            </Box>
-                        </Grid>
-                        <Grid item xs={6} sm={3}>
-                            <Box sx={{ textAlign: 'center' }}>
-                                <Typography variant="h4" sx={{ fontWeight: 700, color: 'info.main' }}>
-                                    {Object.keys(latestMeasurements).length}
-                                </Typography>
-                                <Typography variant="caption" color="text.secondary">
-                                    Latest Values
-                                </Typography>
-                            </Box>
-                        </Grid>
-                    </Grid>
-                </Paper>
-            )}
+            {/* Navigation Helper */}
+            <NavigateToDevicesButton />
+
+            {/* Simulation Control Panel */}
+            {renderSimulationPanel()}
 
             {/* Loading State */}
             {loading && (
-                <Box sx={{ mb: 3 }}>
-                    <LinearProgress />
+                <Box sx={{ textAlign: 'center', my: 4 }}>
+                    <LinearProgress sx={{ mb: 2 }} />
+                    <Typography>Loading tags...</Typography>
                 </Box>
+            )}
+
+            {/* Error State */}
+            {error && !loading && (
+                <Paper sx={{ p: 4, textAlign: 'center', bgcolor: 'error.light', color: 'error.contrastText', mb: 3 }}>
+                    <ErrorIcon sx={{ fontSize: 48, mb: 2 }} />
+                    <Typography variant="h6">Error Loading Tags</Typography>
+                    <Typography variant="body2">{error}</Typography>
+                    <Button
+                        variant="contained"
+                        onClick={fetchTags}
+                        sx={{ mt: 2 }}
+                        startIcon={<RefreshIcon />}
+                    >
+                        Try Again
+                    </Button>
+                </Paper>
             )}
 
             {/* Tags Grid */}
             <Grid container spacing={3}>
-                {Object.keys(groupedTags).length === 0 && !loading && (
+                {!loading && !error && Object.keys(groupedTags).length === 0 && (
                     <Grid item xs={12}>
                         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
                             <Paper sx={{
@@ -1480,38 +1257,24 @@ export default function TagsPage() {
                                     No Tags Found
                                 </Typography>
                                 <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
-                                    {devices.length === 0
-                                        ? 'Create devices first, then add professional SCADA tags to start collecting industrial data'
-                                        : 'Create your first professional SCADA tag to start collecting industrial data'
-                                    }
+                                    Create your first professional SCADA tag to start collecting industrial data
                                 </Typography>
-                                {devices.length > 0 && (
-                                    <Button
-                                        variant="contained"
-                                        startIcon={<AddIcon />}
-                                        onClick={() => { resetForm(); setAddOpen(true); }}
-                                        sx={{ background: 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)', borderRadius: 2, px: 3 }}
-                                    >
-                                        Create First Tag
-                                    </Button>
-                                )}
-                                {devices.length === 0 && (
-                                    <Button
-                                        variant="outlined"
-                                        startIcon={<DevicesIcon />}
-                                        onClick={() => navigate(`/project/${projectId}/devices`)}
-                                        sx={{ borderRadius: 2, px: 3 }}
-                                    >
-                                        Go to Devices
-                                    </Button>
-                                )}
+                                <Button
+                                    variant="contained"
+                                    startIcon={<AddIcon />}
+                                    onClick={() => { resetForm(); setAddOpen(true); }}
+                                    sx={{ background: 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)', borderRadius: 2, px: 3 }}
+                                    disabled={!projectId}
+                                >
+                                    Create First Tag
+                                </Button>
                             </Paper>
                         </motion.div>
                     </Grid>
                 )}
 
-                {Object.entries(groupedTags).map(([groupName, groupTags]) =>
-                    renderTagGroup(groupName, groupTags)
+                {!loading && !error && Object.entries(groupedTags).map(([groupName, groupTags]) =>
+                    groupTags.length > 0 && renderTagGroup(groupName, groupTags)
                 )}
             </Grid>
 
@@ -1519,7 +1282,7 @@ export default function TagsPage() {
             <Fab
                 color="primary"
                 onClick={() => { resetForm(); setAddOpen(true); }}
-                disabled={devices.length === 0}
+                disabled={!projectId}
                 sx={{
                     position: 'fixed',
                     bottom: 32,
@@ -1557,10 +1320,10 @@ export default function TagsPage() {
             >
                 <DialogTitle sx={{ pb: 2 }}>
                     <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                        Create Enhanced SCADA Tag
+                        Create Professional SCADA Tag
                     </Typography>
                     <Typography variant="body2" color="text.secondary">
-                        Configure a new industrial data point with database optimization
+                        Configure a new industrial data point for your project
                     </Typography>
                 </DialogTitle>
                 <DialogContent sx={{ pt: 1 }}>
@@ -1574,22 +1337,26 @@ export default function TagsPage() {
 
                         <Grid item xs={12}>
                             <FormControl fullWidth required>
-                                <InputLabel>Target Device</InputLabel>
+                                <InputLabel>Select Device</InputLabel>
                                 <Select
                                     value={selectedDeviceId}
                                     onChange={e => setSelectedDeviceId(e.target.value)}
-                                    label="Target Device"
+                                    label="Select Device"
                                 >
                                     {devices.map(device => (
-                                        <MenuItem key={device.device_id} value={device.device_id.toString()}>
-                                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                                                <DevicesIcon fontSize="small" />
+                                        <MenuItem key={device.device_id} value={device.device_id}>
+                                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                <Chip
+                                                    label={device.device_type}
+                                                    size="small"
+                                                    color={device.status === 'online' ? 'success' : 'default'}
+                                                />
                                                 <Box>
                                                     <Typography variant="body2" sx={{ fontWeight: 600 }}>
                                                         {device.device_name}
                                                     </Typography>
                                                     <Typography variant="caption" color="text.secondary">
-                                                        {device.device_type} • {device.status}
+                                                        {device.ip_address || 'No IP'} - {device.status || 'unknown'}
                                                     </Typography>
                                                 </Box>
                                             </Box>
@@ -1652,7 +1419,7 @@ export default function TagsPage() {
                                 value={address}
                                 onChange={e => setAddress(e.target.value)}
                                 fullWidth
-                                helperText={getAddressHint(getSelectedDevice()?.device_type)}
+                                helperText={getAddressHint()}
                                 placeholder="40001"
                             />
                         </Grid>
@@ -1945,19 +1712,19 @@ export default function TagsPage() {
                     <Button
                         onClick={handleAdd}
                         variant="contained"
-                        disabled={!tagName.trim() || !selectedDeviceId}
+                        disabled={!tagName.trim() || !selectedDeviceId || !projectId}
                         sx={{
                             borderRadius: 2,
                             px: 3,
                             background: 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)'
                         }}
                     >
-                        Create Enhanced Tag
+                        Create Professional Tag
                     </Button>
                 </DialogActions>
             </Dialog>
 
-            {/* Enhanced Edit Dialog (same as before, no device selection needed) */}
+            {/* Enhanced Edit Dialog */}
             <Dialog
                 open={editOpen}
                 onClose={() => setEditOpen(false)}
@@ -1974,10 +1741,7 @@ export default function TagsPage() {
             >
                 <DialogTitle>
                     <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                        Edit Enhanced Tag: {current?.tag_name}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                        Device: {current?.device_name}
+                        Edit Professional Tag: {current?.tag_name}
                     </Typography>
                 </DialogTitle>
                 <DialogContent>
@@ -2235,7 +1999,7 @@ export default function TagsPage() {
             }}>
                 <DialogTitle>
                     <Typography variant="h5" sx={{ fontWeight: 700, color: 'error.main' }}>
-                        Delete Enhanced Tag
+                        Delete Tag
                     </Typography>
                 </DialogTitle>
                 <DialogContent>
@@ -2243,21 +2007,8 @@ export default function TagsPage() {
                         Are you sure you want to delete tag <strong>{current?.tag_name}</strong>?
                     </Typography>
                     <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                        Device: {current?.device_name} • All associated measurements and statistics will be permanently removed.
+                        All associated measurements will be permanently removed.
                     </Typography>
-                    {tagStats[current?.tag_id]?.measurements_count > 0 && (
-                        <Box sx={{
-                            mt: 2,
-                            p: 2,
-                            borderRadius: 2,
-                            bgcolor: isDark ? 'rgba(239, 68, 68, 0.1)' : 'rgba(239, 68, 68, 0.05)',
-                            border: '1px solid rgba(239, 68, 68, 0.3)'
-                        }}>
-                            <Typography variant="caption" sx={{ fontWeight: 600, color: 'error.main' }}>
-                                ⚠️ This tag has {tagStats[current?.tag_id]?.measurements_count} measurements that will be deleted
-                            </Typography>
-                        </Box>
-                    )}
                 </DialogContent>
                 <DialogActions>
                     <Button onClick={() => setDeleteOpen(false)}>Cancel</Button>
@@ -2265,7 +2016,7 @@ export default function TagsPage() {
                 </DialogActions>
             </Dialog>
 
-            {/* Enhanced Snackbar */}
+            {/* Snackbar */}
             <Snackbar
                 open={snackbar.open}
                 autoHideDuration={4000}

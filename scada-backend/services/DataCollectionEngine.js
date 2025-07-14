@@ -21,7 +21,7 @@ class DataCollectionEngine {
             activeTags: 0
         };
 
-        console.log('🏭 SCADA Data Collection Engine initialized - FIXED VERSION WITH ALARM INTEGRATION');
+        console.log('🏭 SCADA Data Collection Engine initialized - FIXED VERSION WITH WORKING ALARM INTEGRATION');
     }
 
     // ==================== MAIN ENGINE CONTROL ====================
@@ -586,12 +586,12 @@ class DataCollectionEngine {
             console.log(`🔍 Checking alarms for tag ${tag.tag_name} = ${value}`);
 
             const alarmRulesQuery = `
-                SELECT r.*, 
+                SELECT r.*,
                        COALESCE(t.tag_name, 'Unknown') as tag_name,
                        COALESCE(d.device_name, 'Unknown') as device_name
                 FROM alarm_rules r
-                LEFT JOIN tags t ON r.tag_id = t.tag_id
-                LEFT JOIN devices d ON r.device_id = d.device_id
+                         LEFT JOIN tags t ON r.tag_id = t.tag_id
+                         LEFT JOIN devices d ON r.device_id = d.device_id
                 WHERE r.tag_id = $1 AND r.enabled = true
             `;
             const rulesResult = await pool.query(alarmRulesQuery, [tag.tag_id]);
@@ -625,7 +625,7 @@ class DataCollectionEngine {
                     // ACKNOWLEDGED ALARM STILL IN ALARM STATE - Keep acknowledged but update value
                     console.log(`⚠️ Acknowledged alarm still in alarm condition: ${rule.rule_name}`);
                     await pool.query(`
-                        UPDATE alarm_states 
+                        UPDATE alarm_states
                         SET trigger_value = $1, triggered_at = NOW()
                         WHERE rule_id = $2
                     `, [value, rule.id]);
@@ -664,7 +664,7 @@ class DataCollectionEngine {
         }
     }
 
-    // 🔧 FIXED: Trigger alarm with proper state management
+    // 🔧 CRITICAL FIX: Trigger alarm with proper state management and WebSocket calls
     async triggerAlarm(projectId, rule, tag, value) {
         try {
             console.log(`🚨 TRIGGERING ALARM: ${rule.rule_name} - ${tag.tag_name} = ${value}`);
@@ -675,15 +675,15 @@ class DataCollectionEngine {
                     rule_id, tag_id, device_id, project_id,
                     state, trigger_value, triggered_at
                 ) VALUES ($1, $2, $3, $4, 'triggered', $5, NOW())
-                ON CONFLICT (rule_id) 
-                DO UPDATE SET 
+                    ON CONFLICT (rule_id) 
+                DO UPDATE SET
                     state = 'triggered',
-                    trigger_value = $5,
-                    triggered_at = NOW(),
-                    acknowledged_at = NULL,
-                    acknowledged_by = NULL,
-                    ack_message = NULL
-                RETURNING *
+                                           trigger_value = $5,
+                                           triggered_at = NOW(),
+                                           acknowledged_at = NULL,
+                                           acknowledged_by = NULL,
+                                           ack_message = NULL
+                                           RETURNING *
             `;
 
             const stateResult = await pool.query(stateQuery, [
@@ -699,7 +699,7 @@ class DataCollectionEngine {
                     event_type, trigger_value, threshold_value, condition_type,
                     severity, message, created_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
-                RETURNING *
+                    RETURNING *
             `;
 
             const eventValues = [
@@ -711,26 +711,32 @@ class DataCollectionEngine {
             const eventResult = await pool.query(eventQuery, eventValues);
             console.log('✅ Alarm event created:', eventResult.rows[0]);
 
-            // 🔧 Enhanced WebSocket notification for alarms
+            // 🔧 CRITICAL FIX: Enhanced WebSocket notification for alarms
             if (this.wsManager) {
-                this.wsManager.broadcastToProject(projectId, {
-                    type: 'alarm_triggered',
-                    data: {
-                        rule_id: rule.id,
-                        rule_name: rule.rule_name,
-                        tag_name: tag.tag_name,
-                        device_name: tag.device_name || 'Unknown Device',
-                        value: value,
-                        threshold: rule.threshold,
-                        condition_type: rule.condition_type,
-                        severity: rule.severity,
-                        message: rule.message || `${rule.rule_name}: ${value} ${rule.condition_type} ${rule.threshold}`,
-                        triggered_at: new Date().toISOString()
-                    }
+                // 🔧 FIXED: Use correct method signature
+                this.wsManager.broadcastAlarmEvent(projectId, 'triggered', {
+                    rule_id: rule.id,
+                    id: rule.id, // Add id for compatibility
+                    rule_name: rule.rule_name,
+                    tag_id: tag.tag_id,
+                    tag_name: tag.tag_name,
+                    device_id: tag.device_id,
+                    device_name: tag.device_name || 'Unknown Device',
+                    trigger_value: value,
+                    value: value, // Add value for compatibility
+                    threshold: rule.threshold,
+                    condition_type: rule.condition_type,
+                    severity: rule.severity || 'warning',
+                    message: rule.message || `${rule.rule_name}: ${value} ${rule.condition_type} ${rule.threshold}`,
+                    triggered_at: new Date().toISOString(),
+                    state: 'triggered',
+                    current_state: 'triggered',
+                    acknowledged_at: null,
+                    acknowledged_by: null
                 });
 
-                // Also broadcast updated alarm summary
-                await this.broadcastAlarmSummary(projectId);
+                // 🔧 FIXED: Also broadcast updated alarm summary (this now works properly)
+                await this.wsManager.broadcastAlarmSummary(projectId);
             }
 
             console.log(`🚨 ALARM TRIGGERED: ${rule.rule_name} - ${tag.tag_name} = ${value} (${rule.condition_type} ${rule.threshold})`);
@@ -741,7 +747,7 @@ class DataCollectionEngine {
         }
     }
 
-    // 🔧 FIXED: Clear alarm with proper state management
+    // 🔧 CRITICAL FIX: Clear alarm with proper state management and WebSocket calls
     async clearAlarm(projectId, rule, tag, value) {
         try {
             console.log(`✅ CLEARING ALARM: ${rule.rule_name} - ${tag.tag_name} = ${value}`);
@@ -761,7 +767,7 @@ class DataCollectionEngine {
                     event_type, trigger_value, threshold_value, condition_type,
                     severity, message, cleared_at, created_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
-                RETURNING *
+                    RETURNING *
             `;
 
             const eventValues = [
@@ -773,64 +779,33 @@ class DataCollectionEngine {
             const eventResult = await pool.query(eventQuery, eventValues);
             console.log('✅ Alarm cleared event created:', eventResult.rows[0]);
 
-            // Enhanced WebSocket notification
+            // 🔧 CRITICAL FIX: Enhanced WebSocket notification
             if (this.wsManager) {
-                this.wsManager.broadcastToProject(projectId, {
-                    type: 'alarm_cleared',
-                    data: {
-                        rule_id: rule.id,
-                        rule_name: rule.rule_name,
-                        tag_name: tag.tag_name,
-                        value: value,
-                        threshold: rule.threshold,
-                        cleared_at: new Date().toISOString()
-                    }
+                // 🔧 FIXED: Use correct method signature
+                this.wsManager.broadcastAlarmEvent(projectId, 'cleared', {
+                    rule_id: rule.id,
+                    id: rule.id, // Add id for compatibility
+                    rule_name: rule.rule_name,
+                    tag_id: tag.tag_id,
+                    tag_name: tag.tag_name,
+                    device_id: tag.device_id,
+                    device_name: tag.device_name || 'Unknown Device',
+                    trigger_value: value,
+                    value: value, // Add value for compatibility
+                    threshold: rule.threshold,
+                    cleared_at: new Date().toISOString(),
+                    state: 'cleared',
+                    current_state: 'cleared'
                 });
 
-                // Also broadcast updated alarm summary
-                await this.broadcastAlarmSummary(projectId);
+                // 🔧 FIXED: Also broadcast updated alarm summary (this now works properly)
+                await this.wsManager.broadcastAlarmSummary(projectId);
             }
 
             console.log(`✅ ALARM CLEARED: ${rule.rule_name} - ${tag.tag_name} = ${value}`);
 
         } catch (error) {
             console.error('❌ Error clearing alarm:', error);
-        }
-    }
-
-    // 🔧 NEW: Broadcast alarm summary for real-time updates
-    async broadcastAlarmSummary(projectId) {
-        try {
-            // Get current alarm summary
-            const summaryQuery = `
-                SELECT 
-                    COUNT(*) as total_active,
-                    COUNT(CASE WHEN acknowledged_at IS NULL THEN 1 END) as unacknowledged,
-                    COUNT(CASE WHEN acknowledged_at IS NOT NULL THEN 1 END) as acknowledged
-                FROM alarm_states s
-                JOIN alarm_rules r ON s.rule_id = r.id
-                WHERE s.project_id = $1
-            `;
-
-            const summaryResult = await pool.query(summaryQuery, [projectId]);
-            const summary = summaryResult.rows[0];
-
-            if (this.wsManager) {
-                this.wsManager.broadcastToProject(projectId, {
-                    type: 'alarm_summary',
-                    data: {
-                        total_active: parseInt(summary.total_active),
-                        unacknowledged: parseInt(summary.unacknowledged),
-                        acknowledged: parseInt(summary.acknowledged),
-                        has_active_alarms: parseInt(summary.total_active) > 0,
-                        has_unacknowledged: parseInt(summary.unacknowledged) > 0,
-                        timestamp: new Date().toISOString()
-                    }
-                });
-            }
-
-        } catch (error) {
-            console.error('❌ Error broadcasting alarm summary:', error);
         }
     }
 
@@ -1056,7 +1031,7 @@ class DataCollectionEngine {
             engine: this.getStatistics(),
             devices: this.getDeviceStatus(),
             available: true,
-            version: '1.0.0-alarm-integrated',
+            version: '1.0.0-alarm-integrated-fixed',
             timestamp: new Date().toISOString()
         };
     }

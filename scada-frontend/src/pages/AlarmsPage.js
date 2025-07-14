@@ -1,11 +1,12 @@
-// src/pages/AlarmsPage.js - COMPLETE FIXED VERSION WITH SOUND INTEGRATION
-import React, { useEffect, useState } from 'react';
+// src/pages/AlarmsPage.js - COMPLETE FIXED SIMPLIFIED PROFESSIONAL SCADA ALARMS PAGE
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import {
     Grid, Paper, Box, Typography, IconButton, Tooltip, Chip, Fab, Dialog,
     DialogTitle, DialogContent, DialogActions, TextField, Button, Snackbar, Alert,
     InputAdornment, Avatar, Stack, Card, CardContent, MenuItem, FormControl, InputLabel, Select,
     List, ListItem, ListItemText, Divider, Badge, Switch, FormControlLabel, Tabs, Tab,
-    Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TablePagination
+    Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TablePagination,
+    LinearProgress, Collapse, Accordion, AccordionSummary, AccordionDetails
 } from '@mui/material';
 import {
     Add as AddIcon,
@@ -35,18 +36,50 @@ import {
     Stop as StopIcon,
     VolumeUp as VolumeUpIcon,
     VolumeOff as VolumeOffIcon,
-    VolumeDown as VolumeDownIcon
+    VolumeDown as VolumeDownIcon,
+    ExpandMore as ExpandMoreIcon,
+    Close as CloseIcon,
+    Pause as PauseIcon,
+    AutoMode as AutoModeIcon,
+    ManualMode as ManualModeIcon,
+    Speed as SpeedIcon,
+    TrendingUp as TrendingUpIcon,
+    TrendingDown as TrendingDownIcon,
+    TrendingFlat as TrendingFlatIcon,
+    Announcement as AnnouncementIcon,
+    CloudOff as CloudOffIcon
 } from '@mui/icons-material';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
 import axios from '../api/axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useRealTimeData } from '../hooks/useWebSocket';
-
-// FIXED ALARM SOUND IMPORTS:
 import { useAlarmSound } from '../context/AlarmSoundContext';
-import { AlarmSoundControls } from '../components/AlarmSoundControls';
-import { useAlarmSoundEffects } from '../hooks/useAlarmSoundEffects';
+
+// 🚀 SIMPLIFIED DATA NORMALIZATION
+const normalizeAlarmData = (alarm) => {
+    return {
+        rule_id: alarm.rule_id || alarm.id || alarm.alarm_id,
+        rule_name: alarm.rule_name || alarm.name || alarm.alarm_name || 'Unknown Alarm',
+        state: alarm.state || alarm.current_state || alarm.status || 'triggered',
+        severity: alarm.severity || alarm.level || 'warning',
+        trigger_value: alarm.trigger_value || alarm.current_value || alarm.value,
+        threshold: alarm.threshold || alarm.limit || alarm.setpoint,
+        condition_type: alarm.condition_type || alarm.condition || alarm.type || 'high',
+        triggered_at: alarm.triggered_at || alarm.trigger_time || alarm.created_at || alarm.timestamp,
+        acknowledged_at: alarm.acknowledged_at || alarm.ack_time,
+        acknowledged_by: alarm.acknowledged_by || alarm.ack_by,
+        tag_id: alarm.tag_id,
+        tag_name: alarm.tag_name || 'Unknown Tag',
+        device_id: alarm.device_id,
+        device_name: alarm.device_name || 'Unknown Device',
+        enabled: alarm.enabled !== false,
+        message: alarm.message || alarm.description || alarm.alarm_message,
+        ack_message: alarm.ack_message,
+        deadband: alarm.deadband || 0,
+        delay_seconds: alarm.delay_seconds || 0
+    };
+};
 
 function TabPanel({ children, value, index, ...other }) {
     return (
@@ -61,33 +94,36 @@ export default function AlarmsPage() {
     const navigate = useNavigate();
     const { isDark } = useTheme();
 
-    // Enhanced WebSocket real-time data with alarm support
+    // WebSocket real-time data
     const {
         isConnected,
         measurements,
         deviceStatuses,
         measurementCount,
-        // Real-time alarm data from WebSocket
         activeAlarms: wsActiveAlarms = [],
         alarmSummary: wsAlarmSummary = {},
         alarmEvents: wsAlarmEvents = [],
         alarmRuleChanges,
-        // Alarm helper functions
         acknowledgeAlarm: wsAcknowledgeAlarm,
         hasActiveAlarms,
         hasCriticalAlarms,
         unacknowledgedAlarmCount = 0,
-        criticalAlarmCount = 0
+        criticalAlarmCount = 0,
+        getUnacknowledgedAlarms,
+        getAlarmsBySeverity,
+        forceReconnect
     } = useRealTimeData(projectId);
 
     // Tab state
     const [currentTab, setCurrentTab] = useState(0);
 
-    // State for FUXA/Ignition style alarm system
+    // State for alarm system
     const [alarmRules, setAlarmRules] = useState([]);
     const [activeAlarms, setActiveAlarms] = useState([]);
-    const [alarmEvents, setAlarmEvents] = useState([]);
+    const [acknowledgedAlarms, setAcknowledgedAlarms] = useState(new Set()); // Track locally acknowledged alarms
+    const [alarmEventsState, setAlarmEventsState] = useState([]);
     const [alarmStats, setAlarmStats] = useState(null);
+    const [statsError, setStatsError] = useState(false);
 
     const [filtered, setFiltered] = useState([]);
     const [search, setSearch] = useState('');
@@ -100,6 +136,7 @@ export default function AlarmsPage() {
     const [tags, setTags] = useState([]);
     const [devices, setDevices] = useState([]);
     const [showEnabledOnly, setShowEnabledOnly] = useState(false);
+    const [loading, setLoading] = useState(false);
 
     // Enhanced alarm rule form state
     const [ruleName, setRuleName] = useState('');
@@ -118,150 +155,264 @@ export default function AlarmsPage() {
     const [eventsPage, setEventsPage] = useState(0);
     const [eventsRowsPerPage, setEventsRowsPerPage] = useState(25);
 
-    // 🔧 FIXED: Moved BEFORE sound integration to avoid lexical declaration error
-    // Use WebSocket real-time alarm data when available, fallback to API data
-    const displayActiveAlarms = wsActiveAlarms?.length > 0 ? wsActiveAlarms : activeAlarms;
-    const displayAlarmSummary = Object.keys(wsAlarmSummary).length > 0 ? wsAlarmSummary : alarmStats;
-
-    // 🔧 FIXED: Better filtering for active alarms - MOVED UP
-    const getFilteredActiveAlarms = () => {
-        // Use WebSocket data if available, otherwise use API data
-        let alarms = wsActiveAlarms?.length > 0 ? wsActiveAlarms : activeAlarms;
-
-        console.log('🔧 Filtering active alarms:', {
-            source: wsActiveAlarms?.length > 0 ? 'WebSocket' : 'API',
-            total_alarms: alarms?.length || 0,
-            alarms_data: alarms
-        });
-
-        // 🔧 FIXED: Only show truly unacknowledged alarms
-        const filteredAlarms = (alarms || []).filter(alarm => {
-            if (!alarm) return false;
-
-            // 🔧 CRITICAL FIX: Handle different data structures from backend
-            const isTriggered = (
-                alarm.state === 'triggered' ||                           // Backend alarm_states.state
-                (alarm.current_state === 'triggered') ||                 // From JOIN with alarm_rules
-                (!alarm.acknowledged_at && !alarm.acknowledged_by) ||    // Not acknowledged
-                (alarm.state === undefined && !alarm.acknowledged_at)    // Legacy format
-            );
-
-            console.log(`🔧 Alarm ${alarm.rule_name || alarm.id}: state=${alarm.state}, current_state=${alarm.current_state}, ack_at=${alarm.acknowledged_at}, result=${isTriggered}`);
-
-            return isTriggered;
-        });
-
-        console.log('🔧 Filtered result:', {
-            original_count: alarms?.length || 0,
-            active_count: filteredAlarms.length,
-            filtered_alarms: filteredAlarms.map(a => ({ id: a.id, rule_name: a.rule_name, state: a.state }))
-        });
-
-        return filteredAlarms;
-    };
-
-    // Get the currently filtered active alarms for display - MOVED UP
-    const currentActiveAlarms = getFilteredActiveAlarms();
-
-    // ADD ALARM SOUND INTEGRATION - NOW SAFE TO USE currentActiveAlarms
+    // Alarm sound integration
     const {
         playAlarmSequence,
         stopAlarm,
         isEnabled: soundEnabled,
+        setEnabled: setSoundEnabled,
         playTestSound,
         currentAlarm,
-        soundStatus
+        soundStatus,
+        volume,
+        setVolume
     } = useAlarmSound();
 
-    // Enable automatic sound triggering - NOW currentActiveAlarms exists
-    useAlarmSoundEffects(currentActiveAlarms, wsAlarmEvents);
+    // Enhanced alarm data management
+    const displayActiveAlarms = wsActiveAlarms?.length > 0 ? wsActiveAlarms : activeAlarms;
+    const displayAlarmSummary = Object.keys(wsAlarmSummary).length > 0 ? wsAlarmSummary : alarmStats;
+    const displayAlarmEvents = wsAlarmEvents?.length > 0 ? wsAlarmEvents : alarmEventsState;
 
-    // 🔧 FIXED: Fetch alarm rules (configuration)
-    const fetchAlarmRules = () => {
+    // 🚀 FIXED SIMPLIFIED ALARM DETECTION LOGIC
+
+    const currentActiveAlarms = useMemo(() => {
+        console.log('🔧 [SIMPLIFIED] Starting alarm detection...');
+
+        // Step 1: Get all potential alarms from both sources
+        const wsAlarms = Array.isArray(wsActiveAlarms) ? wsActiveAlarms : [];
+        const apiAlarms = Array.isArray(activeAlarms) ? activeAlarms : [];
+
+        console.log('🔧 [SIMPLIFIED] Raw data:', {
+            ws_alarms: wsAlarms.length,
+            api_alarms: apiAlarms.length,
+            ws_summary_active: wsAlarmSummary?.total_active || 0,
+            measurements_count: Object.keys(measurements).length,
+            rules_count: alarmRules.length,
+            acknowledged_locally: acknowledgedAlarms.size
+        });
+
+        // Step 2: **PRIORITY TO WEBSOCKET DATA** - If WebSocket provides data, use it exclusively
+        if (wsAlarms.length > 0 || wsAlarmSummary?.total_active === 0 || wsAlarmSummary?.total_active === "0") {
+            console.log('🎯 [SIMPLIFIED] Using WebSocket data exclusively');
+
+            const wsResult = wsAlarms
+                .map(alarm => normalizeAlarmData(alarm))
+                .filter(alarm => {
+                    if (!alarm.enabled) return false;
+
+                    const ruleIdToCheck = alarm.rule_id || alarm.id || alarm.alarm_id;
+                    if (acknowledgedAlarms.has(ruleIdToCheck)) {
+                        console.log(`✅ [SIMPLIFIED] Skipping locally acknowledged: ${alarm.rule_name}`);
+                        return false;
+                    }
+
+                    const hasBackendAck = !!(
+                        alarm.acknowledged_at ||
+                        alarm.acknowledged_by ||
+                        alarm.ack_time ||
+                        alarm.ack_message ||
+                        (alarm.state && alarm.state.toLowerCase() === 'acknowledged')
+                    );
+
+                    if (hasBackendAck) {
+                        console.log(`✅ [SIMPLIFIED] Skipping backend acknowledged: ${alarm.rule_name}`);
+                        return false;
+                    }
+
+                    const activeStates = ['triggered', 'active', 'alarmed', 'firing'];
+                    const isStateActive = activeStates.includes(alarm.state?.toLowerCase());
+
+                    console.log(`🎯 [SIMPLIFIED] WS Alarm ${alarm.rule_name}: state=${alarm.state}, active=${isStateActive}`);
+                    return isStateActive;
+                });
+
+            console.log('🔧 [SIMPLIFIED] WebSocket result:', {
+                total_active: wsResult.length,
+                critical: wsResult.filter(a => a.severity === 'critical').length,
+                warning: wsResult.filter(a => a.severity === 'warning').length,
+                info: wsResult.filter(a => a.severity === 'info').length
+            });
+
+            return wsResult;
+        }
+
+        // Step 3: Fallback to API data only if WebSocket has no data AND no clear indication of zero alarms
+        console.log('🔄 [SIMPLIFIED] Falling back to API data');
+
+        const apiResult = apiAlarms
+            .map(alarm => normalizeAlarmData(alarm))
+            .filter(alarm => {
+                if (!alarm.enabled) return false;
+
+                const ruleIdToCheck = alarm.rule_id || alarm.id || alarm.alarm_id;
+                if (acknowledgedAlarms.has(ruleIdToCheck)) return false;
+
+                const hasBackendAck = !!(
+                    alarm.acknowledged_at ||
+                    alarm.acknowledged_by ||
+                    (alarm.state && alarm.state.toLowerCase() === 'acknowledged')
+                );
+
+                if (hasBackendAck) return false;
+
+                const activeStates = ['triggered', 'active', 'alarmed', 'firing'];
+                return activeStates.includes(alarm.state?.toLowerCase());
+            });
+
+        console.log('🔧 [SIMPLIFIED] Final result:', {
+            total_active: apiResult.length,
+            critical: apiResult.filter(a => a.severity === 'critical').length,
+            warning: apiResult.filter(a => a.severity === 'warning').length,
+            info: apiResult.filter(a => a.severity === 'info').length,
+            alarms: apiResult.map(a => ({
+                id: a.rule_id,
+                name: a.rule_name,
+                value: a.trigger_value,
+                state: a.state
+            }))
+        });
+
+        return apiResult;
+    }, [wsActiveAlarms, activeAlarms, wsAlarmSummary, measurements, alarmRules, acknowledgedAlarms]);
+
+
+
+
+    // Critical alarms calculation
+    const currentCriticalAlarms = useMemo(() => {
+        return currentActiveAlarms.filter(a => a.severity === 'critical');
+    }, [currentActiveAlarms]);
+
+    // 🧮 CALCULATE LOCAL STATS
+    const calculateLocalStats = useCallback(() => {
+        const enabledRules = alarmRules.filter(r => r.enabled);
+        const criticalRules = alarmRules.filter(r => r.severity === 'critical');
+        const warningRules = alarmRules.filter(r => r.severity === 'warning');
+        const infoRules = alarmRules.filter(r => r.severity === 'info');
+
+        const events24h = displayAlarmEvents.filter(event => {
+            const eventTime = new Date(event.created_at || event.timestamp);
+            const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+            return eventTime > oneDayAgo;
+        });
+
+        return {
+            rules: {
+                total_rules: alarmRules.length,
+                enabled_rules: enabledRules.length,
+                disabled_rules: alarmRules.length - enabledRules.length,
+                critical_rules: criticalRules.length,
+                warning_rules: warningRules.length,
+                info_rules: infoRules.length
+            },
+            total_active: currentActiveAlarms.length,
+            unacknowledged: currentActiveAlarms.length,
+            events_24h: {
+                total_events_24h: events24h.length,
+                triggered_24h: events24h.filter(e => (e.event_type || e.type) === 'triggered').length,
+                acknowledged_24h: events24h.filter(e => (e.event_type || e.type) === 'acknowledged').length,
+                cleared_24h: events24h.filter(e => (e.event_type || e.type) === 'cleared').length
+            }
+        };
+    }, [alarmRules, displayAlarmEvents, currentActiveAlarms]);
+
+    // 📡 DATA FETCHING FUNCTIONS
+    const fetchAlarmRules = useCallback(() => {
         if (!projectId) return;
-        console.log('📤 Fetching alarm rules...');
+        setLoading(true);
+        console.log('📤 [AlarmsPage] Fetching alarm rules...');
 
         axios.get(`/alarms/project/${projectId}/rules`)
             .then(res => {
-                console.log('✅ Alarm rules fetched:', res.data);
-                // 🔧 FIX: Handle both array and object responses
+                console.log('✅ [AlarmsPage] Alarm rules fetched:', res.data);
                 const rules = Array.isArray(res.data) ? res.data : (res.data.rules || []);
                 setAlarmRules(rules);
                 setFiltered(rules);
             })
             .catch(err => {
-                console.error('❌ Failed to fetch alarm rules:', err);
-                setSnackbar({ open: true, msg: 'Failed to load alarm rules', severity: 'error' });
-            });
-    };
+                console.error('❌ [AlarmsPage] Failed to fetch alarm rules:', err);
+                if (err.response?.status === 500) {
+                    console.log('⚠️ [AlarmsPage] Alarm rules endpoint not available - using WebSocket data only');
+                    setSnackbar({ open: true, msg: 'Alarm rules endpoint unavailable - using real-time data', severity: 'warning' });
+                } else {
+                    setSnackbar({ open: true, msg: 'Failed to load alarm rules', severity: 'error' });
+                }
+            })
+            .finally(() => setLoading(false));
+    }, [projectId]);
 
-    // 🔧 FIXED: Fetch active alarms with proper data handling
-    const fetchActiveAlarms = () => {
+    const fetchActiveAlarms = useCallback(() => {
         if (!projectId) return;
-        console.log('📤 Fetching active alarms (triggered only)...');
+        console.log('📤 [AlarmsPage] Fetching active alarms...');
 
-        // 🔧 FIX: Request only triggered alarms
         axios.get(`/alarms/project/${projectId}/active?state=triggered`)
             .then(res => {
-                console.log('✅ Active alarms fetched:', res.data);
-                // 🔧 FIX: Handle both array and object responses
+                console.log('✅ [AlarmsPage] Active alarms fetched:', res.data);
                 const alarms = Array.isArray(res.data) ? res.data : (res.data.alarms || []);
-                console.log('🔧 Processed active alarms:', alarms.length);
                 setActiveAlarms(alarms);
             })
             .catch(err => {
-                console.error('❌ Failed to fetch active alarms:', err);
-                setSnackbar({ open: true, msg: 'Failed to load active alarms', severity: 'error' });
+                console.error('❌ [AlarmsPage] Failed to fetch active alarms:', err);
+                if (err.response?.status === 500) {
+                    console.log('⚠️ [AlarmsPage] Active alarms endpoint not available - using WebSocket data only');
+                } else {
+                    setSnackbar({ open: true, msg: 'Failed to load active alarms', severity: 'error' });
+                }
             });
-    };
+    }, [projectId]);
 
-    // 🔧 FIXED: Fetch alarm events (history) with proper data handling
-    const fetchAlarmEvents = () => {
+    const fetchAlarmEvents = useCallback(() => {
         if (!projectId) return;
-        console.log('📤 Fetching alarm events...');
+        console.log('📤 [AlarmsPage] Fetching alarm events...');
 
         axios.get(`/alarms/project/${projectId}/events?limit=100&days=7`)
             .then(res => {
-                console.log('✅ Alarm events fetched:', res.data);
-                // 🔧 FIX: Handle both array and object responses
+                console.log('✅ [AlarmsPage] Alarm events fetched:', res.data);
                 const events = Array.isArray(res.data) ? res.data : (res.data.events || []);
-                setAlarmEvents(events);
+                setAlarmEventsState(events);
             })
             .catch(err => {
-                console.error('❌ Failed to fetch alarm events:', err);
-                setSnackbar({ open: true, msg: 'Failed to load alarm events', severity: 'error' });
+                console.error('❌ [AlarmsPage] Failed to fetch alarm events:', err);
+                if (err.response?.status === 500) {
+                    console.log('⚠️ [AlarmsPage] Alarm events endpoint not available - using WebSocket data only');
+                } else {
+                    setSnackbar({ open: true, msg: 'Failed to load alarm events', severity: 'error' });
+                }
             });
-    };
+    }, [projectId]);
 
-    // 🔧 FIXED: Fetch alarm statistics with proper data handling
-    const fetchAlarmStats = () => {
-        if (!projectId) return;
-        console.log('📤 Fetching alarm stats...');
+    const fetchAlarmStats = useCallback(() => {
+        if (!projectId || statsError) return;
+        console.log('📤 [AlarmsPage] Fetching alarm stats...');
 
         axios.get(`/alarms/project/${projectId}/stats`)
             .then(res => {
-                console.log('✅ Alarm stats fetched:', res.data);
+                console.log('✅ [AlarmsPage] Alarm stats fetched:', res.data);
                 setAlarmStats(res.data);
+                setStatsError(false);
             })
             .catch(err => {
-                console.error('❌ Failed to fetch alarm stats:', err);
-                // Don't show error for stats as it's not critical
+                console.warn('⚠️ [AlarmsPage] Alarm stats endpoint not available:', err.response?.status);
+
+                if (err.response?.status === 500 || err.response?.status === 404) {
+                    setStatsError(true);
+                    console.log('📊 [AlarmsPage] Using local stats calculation instead');
+                } else {
+                    console.error('❌ [AlarmsPage] Unexpected error fetching alarm stats:', err);
+                }
             });
-    };
+    }, [projectId, statsError]);
 
-    // 🔧 FIXED: Fetch tags and devices with better error handling
-    const fetchTagsAndDevices = () => {
+    const fetchTagsAndDevices = useCallback(() => {
         if (!projectId) return;
-        console.log('📤 Fetching tags and devices...');
+        console.log('📤 [AlarmsPage] Fetching tags and devices...');
 
-        // Fetch devices
         axios.get(`/devices/project/${projectId}`)
             .then(res => {
-                console.log('✅ Devices fetched:', res.data);
+                console.log('✅ [AlarmsPage] Devices fetched:', res.data);
                 const devicesData = Array.isArray(res.data) ? res.data : (res.data.devices || []);
                 setDevices(devicesData);
 
-                // Fetch tags for all devices
                 const tagPromises = devicesData.map(device =>
                     axios.get(`/tags/device/${device.device_id}`)
                         .then(response => {
@@ -273,7 +424,7 @@ export default function AlarmsPage() {
                             }));
                         })
                         .catch(err => {
-                            console.error(`❌ Failed to fetch tags for device ${device.device_id}:`, err);
+                            console.error(`❌ [AlarmsPage] Failed to fetch tags for device ${device.device_id}:`, err);
                             return [];
                         })
                 );
@@ -282,16 +433,41 @@ export default function AlarmsPage() {
             })
             .then(tagResults => {
                 const allTags = tagResults.flat();
-                console.log('✅ Tags fetched:', allTags);
+                console.log('✅ [AlarmsPage] Tags fetched:', allTags.length);
                 setTags(allTags);
             })
             .catch(err => {
-                console.error('❌ Failed to fetch tags and devices:', err);
+                console.error('❌ [AlarmsPage] Failed to fetch tags and devices:', err);
                 setSnackbar({ open: true, msg: 'Failed to load tags and devices', severity: 'error' });
             });
-    };
+    }, [projectId]);
 
-    // Real-time alarm rule change notifications
+    // Refresh all data
+    const refreshAllData = useCallback(() => {
+        console.log('🔄 [AlarmsPage] Refreshing all alarm data...');
+        // Clear local acknowledgment tracking on refresh
+        setAcknowledgedAlarms(new Set());
+        fetchAlarmRules();
+        fetchActiveAlarms();
+        fetchAlarmEvents();
+        fetchAlarmStats();
+        fetchTagsAndDevices();
+    }, [fetchAlarmRules, fetchActiveAlarms, fetchAlarmEvents, fetchAlarmStats, fetchTagsAndDevices]);
+
+    // Add this new function for lighter refreshes
+    const lightRefreshData = useCallback(() => {
+        console.log('🔄 [AlarmsPage] Light refresh without clearing local state...');
+
+        // Don't clear acknowledged alarms - keep local tracking intact
+        fetchActiveAlarms();
+        fetchAlarmEvents();
+
+        // WebSocket automatically provides real-time updates
+        console.log('📡 WebSocket will provide real-time alarm updates automatically');
+    }, [fetchActiveAlarms, fetchAlarmEvents]);
+
+
+    // Real-time alarm rule changes
     useEffect(() => {
         if (alarmRuleChanges) {
             const { type, rule, rule_name } = alarmRuleChanges;
@@ -300,17 +476,17 @@ export default function AlarmsPage() {
 
             switch (type) {
                 case 'created':
-                    message = `New alarm rule created: ${rule?.rule_name}`;
+                    message = `✅ New alarm rule created: ${rule?.rule_name}`;
                     severity = 'success';
                     fetchAlarmRules();
                     break;
                 case 'updated':
-                    message = `Alarm rule updated: ${rule?.rule_name}`;
+                    message = `ℹ️ Alarm rule updated: ${rule?.rule_name}`;
                     severity = 'info';
                     fetchAlarmRules();
                     break;
                 case 'deleted':
-                    message = `Alarm rule deleted: ${rule_name}`;
+                    message = `⚠️ Alarm rule deleted: ${rule_name}`;
                     severity = 'warning';
                     fetchAlarmRules();
                     break;
@@ -320,51 +496,111 @@ export default function AlarmsPage() {
                 setSnackbar({ open: true, msg: message, severity });
             }
         }
-    }, [alarmRuleChanges]);
+    }, [alarmRuleChanges, fetchAlarmRules]);
 
-    // 🔧 FIXED: Real-time alarm event notifications
+    // 🚀 SIMPLIFIED WEBSOCKET ALARM EVENT HANDLER
+    // 🚀 SIMPLIFIED WEBSOCKET ALARM EVENT HANDLER
+
     useEffect(() => {
         if (wsAlarmEvents?.length > 0) {
             const latestEvent = wsAlarmEvents[0];
-            if (latestEvent.type === 'triggered') {
+            console.log('🚨 [SIMPLIFIED] New alarm event:', {
+                event_type: latestEvent.event_type || latestEvent.type,
+                rule_name: latestEvent.rule_name,
+                rule_id: latestEvent.rule_id,
+                trigger_value: latestEvent.trigger_value
+            });
+
+            const eventType = latestEvent.event_type || latestEvent.type;
+
+            if (eventType === 'triggered') {
                 setSnackbar({
                     open: true,
-                    msg: `🚨 ALARM: ${latestEvent.rule_name}`,
+                    msg: `🚨 ALARM TRIGGERED: ${latestEvent.rule_name} (${latestEvent.trigger_value?.toFixed(2) || 'N/A'})`,
                     severity: 'error'
                 });
-                // Auto-switch to active alarms tab
+
+                // Auto-switch to Active Alarms tab
                 if (currentTab === 0) {
                     setCurrentTab(1);
                 }
-                // Refresh active alarms
-                fetchActiveAlarms();
+
+                // Refresh after a short delay
+                setTimeout(refreshAllData, 1000);
+
+            } else if (eventType === 'acknowledged') {
+                const ruleId = latestEvent.rule_id || latestEvent.id || latestEvent.alarm_id;
+
+                // Remove from local acknowledgment tracking when confirmed by WebSocket
+                setAcknowledgedAlarms(prev => {
+                    const newSet = new Set(prev);
+                    newSet.delete(ruleId);
+                    console.log('🔄 [AlarmsPage] Removed from acknowledged set via WebSocket:', ruleId);
+                    return newSet;
+                });
+
+                // Remove from WebSocket active alarms
+                setActiveAlarms(prev => prev.filter(alarm => {
+                    const alarmRuleId = alarm.rule_id || alarm.id || alarm.alarm_id;
+                    return alarmRuleId !== ruleId;
+                }));
+
+                setSnackbar({
+                    open: true,
+                    msg: `✅ ALARM ACKNOWLEDGED: ${latestEvent.rule_name}`,
+                    severity: 'success'
+                });
+
+                setTimeout(refreshAllData, 500);
+
+            } else if (eventType === 'cleared') {
+                const ruleId = latestEvent.rule_id || latestEvent.id || latestEvent.alarm_id;
+
+                console.log('🟢 [AlarmsPage] ALARM CLEARED EVENT:', latestEvent.rule_name);
+
+                // IMMEDIATELY remove from all alarm states
+                setActiveAlarms(prev => {
+                    const filtered = prev.filter(alarm => {
+                        const alarmRuleId = alarm.rule_id || alarm.id || alarm.alarm_id;
+                        return alarmRuleId !== ruleId;
+                    });
+                    console.log(`🟢 [AlarmsPage] Removed cleared alarm ${ruleId}: ${prev.length} → ${filtered.length}`);
+                    return filtered;
+                });
+
+                // Clear from acknowledged tracking to ensure fresh state
+                setAcknowledgedAlarms(prev => {
+                    const newSet = new Set(prev);
+                    newSet.delete(ruleId);
+                    console.log('🟢 [AlarmsPage] Cleared acknowledged tracking for:', ruleId);
+                    return newSet;
+                });
+
+                setSnackbar({
+                    open: true,
+                    msg: `🟢 ALARM CLEARED: ${latestEvent.rule_name}`,
+                    severity: 'success'
+                });
+
+                // Shorter refresh delay for clearing
+                setTimeout(refreshAllData, 300);
             }
         }
-    }, [wsAlarmEvents, currentTab]);
+    }, [wsAlarmEvents, currentTab, refreshAllData]);
 
-    // 🔧 FIXED: Listen for real-time alarm summary updates
-    useEffect(() => {
-        if (Object.keys(wsAlarmSummary).length > 0) {
-            console.log('🔧 WebSocket alarm summary updated:', wsAlarmSummary);
-            // Refresh active alarms when summary changes
-            fetchActiveAlarms();
-        }
-    }, [wsAlarmSummary]);
+
+
 
     // Initial data loading
     useEffect(() => {
-        fetchAlarmRules();
-        fetchActiveAlarms();
-        fetchAlarmEvents();
-        fetchAlarmStats();
-        fetchTagsAndDevices();
-    }, [projectId]);
+        console.log('🎬 [AlarmsPage] Initial data loading...');
+        refreshAllData();
+    }, [refreshAllData]);
 
     // Filter alarm rules
     useEffect(() => {
         let filteredRules = alarmRules;
 
-        // Filter by search term
         if (search) {
             filteredRules = filteredRules.filter(rule =>
                 rule.rule_name?.toLowerCase().includes(search.toLowerCase()) ||
@@ -374,7 +610,6 @@ export default function AlarmsPage() {
             );
         }
 
-        // Filter by enabled status
         if (showEnabledOnly) {
             filteredRules = filteredRules.filter(rule => rule.enabled);
         }
@@ -382,17 +617,11 @@ export default function AlarmsPage() {
         setFiltered(filteredRules);
     }, [search, alarmRules, showEnabledOnly]);
 
-    // 🔧 FIXED: Check if alarm rule has active alarm
+    // Alarm rule status helpers
     const isRuleActive = (ruleId) => {
-        const isActive = currentActiveAlarms?.some(alarm =>
-            alarm.rule_id === ruleId || alarm.id === ruleId
-        ) || false;
-
-        console.log(`🔧 Rule ${ruleId} active check:`, isActive);
-        return isActive;
+        return currentActiveAlarms?.some(alarm => alarm.rule_id === ruleId) || false;
     };
 
-    // Get real-time alarm condition status
     const checkAlarmCondition = (rule) => {
         const currentValue = measurements[rule.tag_id]?.value;
         if (currentValue === null || currentValue === undefined) {
@@ -425,14 +654,156 @@ export default function AlarmsPage() {
         };
     };
 
-    // Create alarm rule
+    // Acknowledgment success handler
+    const handleAckSuccess = useCallback((ruleId) => {
+        console.log('🎉 [AlarmsPage] Acknowledgment successful for rule:', ruleId);
+
+        // Add to locally acknowledged alarms for immediate UI update
+        setAcknowledgedAlarms(prev => {
+            const newSet = new Set(prev);
+            newSet.add(ruleId);
+            console.log('🔄 [AlarmsPage] Added to acknowledged set:', ruleId);
+            return newSet;
+        });
+
+        // Immediately remove from all local alarm states
+        setActiveAlarms(prevAlarms => {
+            const updated = prevAlarms.filter(alarm => {
+                const alarmRuleId = alarm.rule_id || alarm.id;
+                return alarmRuleId !== ruleId;
+            });
+            return updated;
+        });
+
+        setAckOpen(false);
+        setAckMessage('');
+
+        setSnackbar({
+            open: true,
+            msg: `✅ Alarm "${current?.rule_name}" acknowledged successfully!`,
+            severity: 'success'
+        });
+
+        // Optional: Light refresh after 5 seconds (uncomment if needed)
+        setTimeout(() => {
+            lightRefreshData();
+        }, 5000);
+
+        // Keep the local acknowledgment for a long time
+        setTimeout(() => {
+            setAcknowledgedAlarms(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(ruleId);
+                console.log('🔄 [AlarmsPage] Removed from acknowledged set after extended delay:', ruleId);
+                return newSet;
+            });
+        }, 30000); // Keep for 30 seconds
+
+    }, [current, lightRefreshData]); // Add lightRefreshData to dependencies if you use it
+
+    // Enhanced acknowledge alarm function
+    const handleAcknowledge = async () => {
+        if (!current) {
+            console.error('❌ [AlarmsPage] No current alarm selected for acknowledgment');
+            return;
+        }
+
+        const ruleId = current.rule_id || current.id;
+        console.log('📤 [AlarmsPage] Acknowledging alarm:', {
+            rule_name: current.rule_name,
+            rule_id: ruleId,
+            project_id: projectId,
+            ack_message: ackMessage
+        });
+
+        setLoading(true);
+
+        try {
+            // First, try the WebSocket acknowledgment if available
+            if (wsAcknowledgeAlarm && typeof wsAcknowledgeAlarm === 'function') {
+                console.log('🔄 [AlarmsPage] Trying WebSocket acknowledgment first...');
+
+                const wsSuccess = await wsAcknowledgeAlarm(
+                    ruleId,
+                    ackMessage || 'Acknowledged by operator via AlarmsPage'
+                );
+
+                if (wsSuccess) {
+                    console.log('✅ [AlarmsPage] WebSocket acknowledgment successful');
+                    handleAckSuccess(ruleId);
+                    return;
+                } else {
+                    console.log('⚠️ [AlarmsPage] WebSocket acknowledgment failed, trying API...');
+                }
+            }
+
+            // Fallback to API acknowledgment
+            const ackPayload = {
+                message: ackMessage || 'Acknowledged by operator via AlarmsPage',
+                acknowledged_by: 'operator'
+            };
+
+            console.log('📤 [AlarmsPage] Trying API acknowledgment with payload:', ackPayload);
+
+            try {
+                const response = await axios.put(
+                    `/alarms/project/${projectId}/rules/${ruleId}/acknowledge`,
+                    ackPayload
+                );
+
+                console.log('✅ [AlarmsPage] Primary API acknowledgment successful:', response.data);
+                handleAckSuccess(ruleId);
+                return;
+
+            } catch (primaryError) {
+                console.log('⚠️ [AlarmsPage] Primary endpoint failed, trying alternative...', primaryError.response?.status);
+
+                try {
+                    const response = await axios.put(
+                        `/alarms/project/${projectId}/active/${ruleId}/ack`,
+                        ackPayload
+                    );
+
+                    console.log('✅ [AlarmsPage] Alternative API acknowledgment successful:', response.data);
+                    handleAckSuccess(ruleId);
+                    return;
+
+                } catch (alternativeError) {
+                    console.error('❌ [AlarmsPage] Both API endpoints failed:', {
+                        primary: primaryError.response?.status,
+                        alternative: alternativeError.response?.status
+                    });
+
+                    throw new Error(
+                        `Acknowledgment failed: ${primaryError.response?.data?.error || primaryError.message}`
+                    );
+                }
+            }
+
+        } catch (error) {
+            console.error('❌ [AlarmsPage] Complete acknowledgment failure:', error);
+            setSnackbar({
+                open: true,
+                msg: `❌ Failed to acknowledge alarm: ${error.message}`,
+                severity: 'error'
+            });
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Use local stats when backend stats aren't available
+    const effectiveStats = displayAlarmSummary || calculateLocalStats();
+
+    // CRUD operations
     const handleAdd = () => {
         if (!ruleName || !tagId || !deviceId || !threshold) {
             setSnackbar({ open: true, msg: 'Please fill all required fields', severity: 'error' });
             return;
         }
 
-        console.log('📤 Creating alarm rule...');
+        console.log('📤 [AlarmsPage] Creating alarm rule...');
+        setLoading(true);
 
         axios.post(`/alarms/project/${projectId}/rules`, {
             rule_name: ruleName,
@@ -447,33 +818,32 @@ export default function AlarmsPage() {
             enabled
         })
             .then(() => {
-                console.log('✅ Alarm rule created successfully');
+                console.log('✅ [AlarmsPage] Alarm rule created successfully');
                 setAddOpen(false);
                 resetForm();
-                setSnackbar({ open: true, msg: 'Alarm rule created successfully!', severity: 'success' });
-                fetchAlarmRules();
-                fetchAlarmStats();
+                setSnackbar({ open: true, msg: '✅ Alarm rule created successfully!', severity: 'success' });
+                refreshAllData();
             })
             .catch(err => {
-                console.error('❌ Failed to create alarm rule:', err);
+                console.error('❌ [AlarmsPage] Failed to create alarm rule:', err);
                 setSnackbar({
                     open: true,
                     msg: err.response?.data?.error || 'Failed to create alarm rule',
                     severity: 'error'
                 });
-            });
+            })
+            .finally(() => setLoading(false));
     };
 
-    // Update alarm rule
     const handleEdit = () => {
         if (!current || !ruleName || !tagId || !threshold) {
             setSnackbar({ open: true, msg: 'Please fill all required fields', severity: 'error' });
             return;
         }
 
-        console.log('📤 Updating alarm rule...');
+        console.log('📤 [AlarmsPage] Updating alarm rule...');
+        setLoading(true);
 
-        // 🔧 FIX: Use correct rule ID field
         const ruleId = current.rule_id || current.id;
 
         axios.put(`/alarms/project/${projectId}/rules/${ruleId}`, {
@@ -487,120 +857,50 @@ export default function AlarmsPage() {
             enabled
         })
             .then(() => {
-                console.log('✅ Alarm rule updated successfully');
+                console.log('✅ [AlarmsPage] Alarm rule updated successfully');
                 setEditOpen(false);
                 resetForm();
-                setSnackbar({ open: true, msg: 'Alarm rule updated successfully!', severity: 'success' });
-                fetchAlarmRules();
-                fetchAlarmStats();
+                setSnackbar({ open: true, msg: '✅ Alarm rule updated successfully!', severity: 'success' });
+                refreshAllData();
             })
             .catch(err => {
-                console.error('❌ Failed to update alarm rule:', err);
+                console.error('❌ [AlarmsPage] Failed to update alarm rule:', err);
                 setSnackbar({
                     open: true,
                     msg: err.response?.data?.error || 'Failed to update alarm rule',
                     severity: 'error'
                 });
-            });
+            })
+            .finally(() => setLoading(false));
     };
 
-    // Delete alarm rule
     const handleDelete = () => {
         if (!current) return;
 
-        console.log('📤 Deleting alarm rule...');
+        console.log('📤 [AlarmsPage] Deleting alarm rule...');
+        setLoading(true);
 
-        // 🔧 FIX: Use correct rule ID field
         const ruleId = current.rule_id || current.id;
 
         axios.delete(`/alarms/project/${projectId}/rules/${ruleId}`)
             .then(() => {
-                console.log('✅ Alarm rule deleted successfully');
+                console.log('✅ [AlarmsPage] Alarm rule deleted successfully');
                 setDeleteOpen(false);
-                setSnackbar({ open: true, msg: 'Alarm rule deleted successfully!', severity: 'success' });
-                fetchAlarmRules();
-                fetchActiveAlarms();
-                fetchAlarmStats();
+                setSnackbar({ open: true, msg: '✅ Alarm rule deleted successfully!', severity: 'success' });
+                refreshAllData();
             })
             .catch(err => {
-                console.error('❌ Failed to delete alarm rule:', err);
+                console.error('❌ [AlarmsPage] Failed to delete alarm rule:', err);
                 setSnackbar({
                     open: true,
                     msg: err.response?.data?.error || 'Failed to delete alarm rule',
                     severity: 'error'
                 });
-            });
-    };
-
-    // 🔧 FIXED: Enhanced acknowledge alarm with proper rule ID handling
-    const handleAcknowledge = () => {
-        if (!current) return;
-
-        // 🔧 FIX: Use correct rule ID field
-        const ruleId = current.rule_id || current.id;
-        console.log('📤 Acknowledging alarm:', current.rule_name, 'Rule ID:', ruleId);
-
-        const ackPayload = {
-            message: ackMessage || 'Acknowledged by operator'
-        };
-
-        // 🔧 FIX: Use the exact URL pattern that matches your routes
-        axios.put(`/alarms/project/${projectId}/active/${ruleId}/ack`, ackPayload)
-            .then((response) => {
-                console.log('✅ Alarm acknowledged successfully:', response.data);
-
-                // 🔧 IMMEDIATE FIX: Remove the acknowledged alarm from active alarms immediately
-                setActiveAlarms(prevAlarms => {
-                    const updatedAlarms = prevAlarms.filter(alarm => {
-                        const alarmRuleId = alarm.rule_id || alarm.id;
-                        return alarmRuleId !== ruleId;
-                    });
-                    console.log('🔧 Removed alarm from local state. Remaining alarms:', updatedAlarms.length);
-                    return updatedAlarms;
-                });
-
-                // Close dialog
-                setAckOpen(false);
-                setAckMessage('');
-
-                setSnackbar({
-                    open: true,
-                    msg: `✅ Alarm "${current.rule_name}" acknowledged successfully!`,
-                    severity: 'success'
-                });
-
-                // Refresh data after delay to sync with backend
-                setTimeout(() => {
-                    fetchActiveAlarms();
-                    fetchAlarmEvents();
-                    fetchAlarmStats();
-                    fetchAlarmRules();
-                }, 1000);
-
-                // 🔧 FIX: Try WebSocket acknowledgment as well if connected
-                if (isConnected && wsAcknowledgeAlarm) {
-                    console.log('🔗 Also sending WebSocket acknowledgment');
-                    try {
-                        wsAcknowledgeAlarm(ruleId, ackMessage || 'Acknowledged by operator');
-                    } catch (wsError) {
-                        console.log('⚠️ WebSocket acknowledgment failed:', wsError);
-                    }
-                }
-
             })
-            .catch(err => {
-                console.error('❌ Failed to acknowledge alarm:', err);
-                console.error('❌ Error response:', err.response?.data);
-                console.error('❌ Error status:', err.response?.status);
-
-                setSnackbar({
-                    open: true,
-                    msg: `❌ Failed to acknowledge alarm: ${err.response?.data?.details || err.response?.data?.error || err.message}`,
-                    severity: 'error'
-                });
-            });
+            .finally(() => setLoading(false));
     };
 
+    // Helper functions
     const resetForm = () => {
         setRuleName(''); setConditionType('high'); setTagId(''); setDeviceId('');
         setThreshold(''); setSeverity('warning'); setDeadband(''); setDelaySeconds('');
@@ -623,11 +923,13 @@ export default function AlarmsPage() {
     };
 
     const openAcknowledge = (alarm) => {
+        console.log('🎯 [AlarmsPage] Opening acknowledgment dialog for:', alarm.rule_name);
         setCurrent(alarm);
         setAckMessage('');
         setAckOpen(true);
     };
 
+    // UI helper functions
     const getSeverityColor = (severity) => {
         switch (severity?.toLowerCase()) {
             case 'critical': return 'error';
@@ -674,6 +976,38 @@ export default function AlarmsPage() {
         }
     };
 
+    // 🔍 Debug Component
+    const AlarmDebugInfo = () => {
+        if (process.env.NODE_ENV !== 'development') return null;
+
+        return (
+            <Alert severity="info" sx={{ mb: 3, background: isDark ? 'rgba(99, 102, 241, 0.1)' : 'rgba(99, 102, 241, 0.05)' }}>
+                <Typography variant="body2">
+                    🔧 <strong>SIMPLIFIED Debug:</strong>
+                    WS Active: {wsActiveAlarms?.length || 0},
+                    API Active: {activeAlarms?.length || 0},
+                    Displayed: {currentActiveAlarms?.length || 0},
+                    WS Summary: {wsAlarmSummary?.total_active || 0},
+                    Acknowledged: {acknowledgedAlarms.size},
+                    Measurements: {Object.keys(measurements).length},
+                    Rules: {alarmRules.length}
+                </Typography>
+                {currentActiveAlarms.length > 0 && (
+                    <Typography variant="body2" sx={{ mt: 1 }}>
+                        🚨 <strong>Active Alarms:</strong> {
+                        currentActiveAlarms.map(a => `${a.rule_name}(${a.trigger_value?.toFixed(2) || 'N/A'})`).join(', ')
+                    }
+                    </Typography>
+                )}
+                {acknowledgedAlarms.size > 0 && (
+                    <Typography variant="body2" sx={{ mt: 1 }}>
+                        ✅ <strong>Locally Acknowledged:</strong> {Array.from(acknowledgedAlarms).join(', ')}
+                    </Typography>
+                )}
+            </Alert>
+        );
+    };
+
     return (
         <Box sx={{
             p: 4,
@@ -682,13 +1016,25 @@ export default function AlarmsPage() {
                 : 'linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%)',
             minHeight: '100vh'
         }}>
+            {/* Loading indicator */}
+            {loading && (
+                <LinearProgress sx={{
+                    position: 'fixed',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    zIndex: 9999
+                }} />
+            )}
+
             {/* Enhanced Header */}
             <Box sx={{ mb: 4 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2 }}>
                     <Avatar sx={{
                         width: 48,
                         height: 48,
-                        background: 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)'
+                        background: 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)',
+                        animation: currentActiveAlarms.length > 0 ? 'pulse 2s infinite' : 'none'
                     }}>
                         <WarningIcon />
                     </Avatar>
@@ -702,15 +1048,26 @@ export default function AlarmsPage() {
                             WebkitBackgroundClip: 'text',
                             color: 'transparent'
                         }}>
-                            Alarms
+                            🚨 SIMPLIFIED SCADA Alarms
                         </Typography>
-                        <Typography variant="body1" color="text.secondary">
-                            Professional SCADA alarm management system
-                        </Typography>
+                        <Box>
+                            <Typography variant="body1" color="text.secondary" component="span">
+                                Simplified alarm detection with improved reliability
+                            </Typography>
+                            {statsError && (
+                                <Chip
+                                    icon={<CloudOffIcon />}
+                                    label="Local Stats Mode"
+                                    size="small"
+                                    color="warning"
+                                    sx={{ ml: 1, fontSize: '0.7rem' }}
+                                />
+                            )}
+                        </Box>
                     </Box>
                 </Box>
 
-                {/* Status Cards */}
+                {/* Enhanced Status Cards */}
                 <Grid container spacing={2} sx={{ mb: 3 }}>
                     <Grid item xs={12} sm={6} md={3}>
                         <Card sx={{
@@ -719,25 +1076,34 @@ export default function AlarmsPage() {
                         }}>
                             <CardContent sx={{ p: 2 }}>
                                 <Typography variant="h4" sx={{ fontWeight: 800 }}>
-                                    {displayAlarmSummary?.rules?.total_rules || alarmRules.length}
+                                    {effectiveStats?.rules?.total_rules || alarmRules.length}
                                 </Typography>
                                 <Typography variant="body2" sx={{ opacity: 0.9 }}>
                                     Alarm Rules
+                                </Typography>
+                                <Typography variant="caption" sx={{ opacity: 0.7 }}>
+                                    {effectiveStats?.rules?.enabled_rules || alarmRules.filter(r => r.enabled).length} enabled
                                 </Typography>
                             </CardContent>
                         </Card>
                     </Grid>
                     <Grid item xs={12} sm={6} md={3}>
                         <Card sx={{
-                            background: 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)',
-                            color: 'white'
+                            background: currentActiveAlarms.length > 0
+                                ? 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)'
+                                : 'linear-gradient(135deg, #10b981 0%, #34d399 100%)',
+                            color: 'white',
+                            animation: currentActiveAlarms.length > 0 ? 'pulse 2s infinite' : 'none'
                         }}>
                             <CardContent sx={{ p: 2 }}>
                                 <Typography variant="h4" sx={{ fontWeight: 800 }}>
-                                    {displayAlarmSummary?.active_alarms?.total_active || currentActiveAlarms.length}
+                                    {currentActiveAlarms.length}
                                 </Typography>
                                 <Typography variant="body2" sx={{ opacity: 0.9 }}>
                                     Active Alarms
+                                </Typography>
+                                <Typography variant="caption" sx={{ opacity: 0.7 }}>
+                                    {currentCriticalAlarms.length} critical
                                 </Typography>
                             </CardContent>
                         </Card>
@@ -749,17 +1115,22 @@ export default function AlarmsPage() {
                         }}>
                             <CardContent sx={{ p: 2 }}>
                                 <Typography variant="h4" sx={{ fontWeight: 800 }}>
-                                    {unacknowledgedAlarmCount || displayAlarmSummary?.active_alarms?.unacknowledged || currentActiveAlarms.length}
+                                    {currentActiveAlarms.length}
                                 </Typography>
                                 <Typography variant="body2" sx={{ opacity: 0.9 }}>
                                     Unacknowledged
+                                </Typography>
+                                <Typography variant="caption" sx={{ opacity: 0.7 }}>
+                                    Need attention
                                 </Typography>
                             </CardContent>
                         </Card>
                     </Grid>
                     <Grid item xs={12} sm={6} md={3}>
                         <Card sx={{
-                            background: 'linear-gradient(135deg, #10b981 0%, #34d399 100%)',
+                            background: isConnected
+                                ? 'linear-gradient(135deg, #10b981 0%, #34d399 100%)'
+                                : 'linear-gradient(135deg, #6b7280 0%, #9ca3af 100%)',
                             color: 'white'
                         }}>
                             <CardContent sx={{ p: 2 }}>
@@ -769,13 +1140,16 @@ export default function AlarmsPage() {
                                 <Typography variant="body2" sx={{ opacity: 0.9 }}>
                                     Live Tags
                                 </Typography>
+                                <Typography variant="caption" sx={{ opacity: 0.7 }}>
+                                    {isConnected ? 'Real-time' : 'Offline'}
+                                </Typography>
                             </CardContent>
                         </Card>
                     </Grid>
                 </Grid>
 
-                {/* UPDATED Controls with Sound Integration */}
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                {/* Enhanced Controls */}
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 2 }}>
                     <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap">
                         <Chip
                             icon={isConnected ? <WifiIcon /> : <WifiOffIcon />}
@@ -790,55 +1164,22 @@ export default function AlarmsPage() {
                                 icon={<NotificationsActiveIcon />}
                                 label={`${currentActiveAlarms.length} Live Alarms`}
                                 color="error"
-                                sx={{ fontWeight: 600, animation: hasCriticalAlarms ? 'pulse 2s infinite' : 'none' }}
-                            />
-                        )}
-
-                        {/* ALARM SOUND STATUS INDICATOR */}
-                        <Chip
-                            icon={soundEnabled ? <VolumeUpIcon /> : <VolumeOffIcon />}
-                            label={soundEnabled ? 'Sounds On' : 'Sounds Off'}
-                            color={soundEnabled ? 'success' : 'default'}
-                            sx={{
-                                fontWeight: 600,
-                                cursor: 'pointer',
-                                '&:hover': {
-                                    background: soundEnabled ? 'rgba(16, 185, 129, 0.1)' : 'rgba(156, 163, 175, 0.1)'
-                                }
-                            }}
-                            onClick={() => {
-                                // Quick test sound
-                                if (soundEnabled) {
-                                    playTestSound('warning');
-                                }
-                            }}
-                        />
-
-                        {/* Show current playing alarm */}
-                        {currentAlarm && soundStatus === 'playing' && (
-                            <Chip
-                                icon={<VolumeUpIcon />}
-                                label={`🔊 ${currentAlarm.rule_name || 'Alarm Playing'}`}
-                                color="error"
-                                size="small"
                                 sx={{
                                     fontWeight: 600,
-                                    animation: 'pulse 2s infinite'
+                                    animation: currentCriticalAlarms.length > 0 ? 'pulse 2s infinite' : 'none',
+                                    cursor: 'pointer'
                                 }}
-                                onDelete={stopAlarm}
-                                deleteIcon={<StopIcon />}
+                                onClick={() => setCurrentTab(1)}
                             />
                         )}
 
-                        {/* WebSocket data indicator */}
-                        {wsActiveAlarms?.length > 0 && (
-                            <Chip
-                                label="Real-time Alarm Data"
-                                color="success"
-                                size="small"
-                                sx={{ fontWeight: 600 }}
-                            />
-                        )}
+                        {/* Detection status indicator */}
+                        <Chip
+                            icon={<CheckCircleIcon />}
+                            label="Simplified Detection"
+                            color="success"
+                            sx={{ fontWeight: 600 }}
+                        />
 
                         <FormControlLabel
                             control={
@@ -853,16 +1194,14 @@ export default function AlarmsPage() {
                     </Stack>
 
                     <Stack direction="row" spacing={2} alignItems="center">
-                        {/* ALARM SOUND CONTROLS */}
-                        <AlarmSoundControls variant="compact" />
-
                         <IconButton onClick={() => {
-                            fetchAlarmRules();
-                            fetchActiveAlarms();
-                            fetchAlarmEvents();
-                            fetchAlarmStats();
-                        }}>
+                            setAcknowledgedAlarms(new Set()); // Clear local tracking on manual refresh
+                            refreshAllData();
+                        }} disabled={loading} title="Refresh All Data">
                             <RefreshIcon />
+                        </IconButton>
+                        <IconButton onClick={forceReconnect} disabled={loading} title="Force WebSocket Reconnect">
+                            <WifiIcon />
                         </IconButton>
                         <TextField
                             placeholder="Search alarms..."
@@ -889,712 +1228,669 @@ export default function AlarmsPage() {
                 </Box>
             </Box>
 
-            {/* Active Alarms Alert - Enhanced with real-time data */}
-            {currentActiveAlarms?.length > 0 && (
-                <motion.div
-                    initial={{ opacity: 0, y: -20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                >
-                    <Alert
-                        severity={hasCriticalAlarms ? "error" : "warning"}
-                        sx={{
-                            mb: 3,
-                            borderRadius: 3,
-                            '& .MuiAlert-message': { fontWeight: 600 }
-                        }}
-                        icon={<NotificationsActiveIcon />}
-                        action={
-                            <Button
-                                color="inherit"
-                                size="small"
-                                onClick={() => setCurrentTab(1)}
-                            >
-                                VIEW ALL
-                            </Button>
-                        }
-                    >
-                        <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                            {currentActiveAlarms.length} Active Alarm{currentActiveAlarms.length > 1 ? 's' : ''} -
-                            {hasCriticalAlarms ? ' CRITICAL ATTENTION REQUIRED' : ' Immediate Attention Required'}
-                        </Typography>
-                        <List dense>
-                            {currentActiveAlarms.slice(0, 3).map((alarm, index) => (
-                                <ListItem key={index} sx={{ py: 0 }}>
-                                    <Typography variant="body2">
-                                        • {alarm.rule_name} - {alarm.severity?.toUpperCase()} - {alarm.tag_name}
-                                        {alarm.severity === 'critical' && ' 🔴'}
-                                    </Typography>
-                                </ListItem>
-                            ))}
-                            {currentActiveAlarms.length > 3 && (
-                                <ListItem sx={{ py: 0 }}>
-                                    <Typography variant="body2" color="text.secondary">
-                                        ... and {currentActiveAlarms.length - 3} more alarms
-                                    </Typography>
-                                </ListItem>
-                            )}
-                        </List>
-                    </Alert>
-                </motion.div>
-            )}
+            {/* 🔍 Debug Information */}
+            <AlarmDebugInfo />
 
-            {/* Tabs for different views */}
+            {/* Enhanced Tabs */}
             <Paper sx={{
-                mb: 3,
                 background: isDark
                     ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
-                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+                border: isDark ? '1px solid #475569' : '1px solid #e2e8f0',
+                borderRadius: 3
             }}>
                 <Tabs
                     value={currentTab}
                     onChange={(e, newValue) => setCurrentTab(newValue)}
-                    indicatorColor="primary"
-                    textColor="primary"
-                >
-                    <Tab label={`Alarm Rules (${alarmRules.length})`} icon={<SettingsIcon />} />
-                    <Tab
-                        label={
-                            <Badge badgeContent={currentActiveAlarms.length} color="error">
-                                Active Alarms
-                            </Badge>
+                    sx={{
+                        borderBottom: isDark ? '1px solid #475569' : '1px solid #e2e8f0',
+                        px: 3,
+                        '& .MuiTab-root': {
+                            textTransform: 'none',
+                            fontWeight: 600,
+                            fontSize: '1rem',
+                            minHeight: 60
                         }
-                        icon={<NotificationsActiveIcon />}
+                    }}
+                >
+                    <Tab
+                        icon={<SettingsIcon />}
+                        label={`Alarm Rules (${filtered.length})`}
+                        iconPosition="start"
                     />
-                    <Tab label={`Event History (${alarmEvents.length})`} icon={<HistoryIcon />} />
-                    <Tab label="Statistics" icon={<AssessmentIcon />} />
+                    <Tab
+                        icon={<NotificationsActiveIcon />}
+                        label={`Active Alarms (${currentActiveAlarms.length})`}
+                        iconPosition="start"
+                        sx={{
+                            color: currentActiveAlarms.length > 0 ? 'error.main' : 'inherit',
+                            animation: currentCriticalAlarms.length > 0 ? 'pulse 2s infinite' : 'none'
+                        }}
+                    />
+                    <Tab
+                        icon={<HistoryIcon />}
+                        label={`Event History (${displayAlarmEvents.length})`}
+                        iconPosition="start"
+                    />
+                    <Tab
+                        icon={<AssessmentIcon />}
+                        label="Statistics"
+                        iconPosition="start"
+                    />
                 </Tabs>
-            </Paper>
 
-            {/* Tab Panel 0: Alarm Rules */}
-            <TabPanel value={currentTab} index={0}>
-                <Grid container spacing={3}>
-                    {filtered.length === 0 && (
-                        <Grid item xs={12}>
-                            <motion.div
-                                initial={{ opacity: 0, y: 20 }}
-                                animate={{ opacity: 1, y: 0 }}
-                            >
-                                <Paper sx={{
-                                    p: 6,
-                                    textAlign: 'center',
-                                    background: isDark
-                                        ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
-                                        : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
-                                    border: isDark ? '2px dashed #475569' : '2px dashed #cbd5e1'
-                                }}>
-                                    <SettingsIcon sx={{ fontSize: 64, color: 'text.disabled', mb: 2 }} />
-                                    <Typography variant="h5" gutterBottom sx={{ fontWeight: 600 }}>
-                                        {showEnabledOnly ? 'No Enabled Alarm Rules' : 'No Alarm Rules Configured'}
-                                    </Typography>
-                                    <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
-                                        {showEnabledOnly
-                                            ? 'Enable some alarm rules to monitor your system'
-                                            : 'Create your first alarm rule to monitor critical conditions'
-                                        }
-                                    </Typography>
-                                    {!showEnabledOnly && (
+                {/* Tab Panels */}
+                <TabPanel value={currentTab} index={0}>
+                    {/* Alarm Rules Tab */}
+                    <Grid container spacing={3}>
+                        {filtered.length === 0 && !loading ? (
+                            <Grid item xs={12}>
+                                <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+                                    <Paper sx={{
+                                        p: 6,
+                                        textAlign: 'center',
+                                        background: isDark
+                                            ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                                            : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+                                        border: isDark ? '2px dashed #475569' : '2px dashed #cbd5e1'
+                                    }}>
+                                        <WarningIcon sx={{ fontSize: 64, color: 'text.disabled', mb: 2 }} />
+                                        <Typography variant="h5" gutterBottom sx={{ fontWeight: 600 }}>
+                                            No Alarm Rules Found
+                                        </Typography>
+                                        <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
+                                            Create your first alarm rule to start monitoring parameters
+                                        </Typography>
                                         <Button
                                             variant="contained"
                                             startIcon={<AddIcon />}
-                                            onClick={() => {
-                                                resetForm();
-                                                setAddOpen(true);
-                                            }}
-                                            sx={{ background: 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)' }}
+                                            onClick={() => { resetForm(); setAddOpen(true); }}
+                                            sx={{ background: 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)', borderRadius: 2, px: 3 }}
                                         >
                                             Create First Alarm Rule
                                         </Button>
-                                    )}
-                                </Paper>
-                            </motion.div>
-                        </Grid>
-                    )}
+                                    </Paper>
+                                </motion.div>
+                            </Grid>
+                        ) : (
+                            filtered.map((rule, index) => {
+                                const condition = checkAlarmCondition(rule);
+                                const isActive = isRuleActive(rule.rule_id || rule.id);
+                                const SeverityIcon = getSeverityIcon(rule.severity);
+                                const DeviceIcon = getDeviceIcon(rule.device_type);
 
-                    <AnimatePresence>
-                        {filtered.map((rule, index) => {
-                            const SeverityIcon = getSeverityIcon(rule.severity);
-                            const ruleId = rule.rule_id || rule.id;
-                            const isActive = isRuleActive(ruleId);
-                            const DeviceIcon = getDeviceIcon(rule.device_type);
-                            const alarmCondition = checkAlarmCondition(rule);
-
-                            return (
-                                <Grid item xs={12} sm={6} lg={4} key={ruleId}>
-                                    <motion.div
-                                        initial={{ opacity: 0, y: 20 }}
-                                        animate={{ opacity: 1, y: 0 }}
-                                        exit={{ opacity: 0, y: -20 }}
-                                        transition={{ delay: index * 0.1 }}
-                                        whileHover={{ y: -4 }}
-                                        layout
-                                    >
-                                        <Card sx={{
-                                            height: '100%',
-                                            background: isActive
-                                                ? isDark
-                                                    ? 'linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%)'
-                                                    : 'linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%)'
-                                                : !rule.enabled
-                                                    ? isDark
-                                                        ? 'linear-gradient(135deg, #374151 0%, #4b5563 100%)'
-                                                        : 'linear-gradient(135deg, #f9fafb 0%, #f3f4f6 100%)'
-                                                    : isDark
-                                                        ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
-                                                        : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
-                                            border: isActive
-                                                ? '2px solid #dc2626'
-                                                : !rule.enabled
-                                                    ? isDark ? '1px solid #6b7280' : '1px solid #d1d5db'
-                                                    : isDark ? '1px solid #475569' : '1px solid #e2e8f0',
-                                            cursor: 'pointer',
-                                            transition: 'all 0.3s ease-in-out',
-                                            position: 'relative',
-                                            opacity: rule.enabled ? 1 : 0.7,
-                                            '&:hover': {
-                                                borderColor: '#2563eb',
-                                                boxShadow: isDark
-                                                    ? '0 20px 40px rgba(37, 99, 235, 0.2)'
-                                                    : '0 20px 40px rgba(37, 99, 235, 0.1)',
-                                                '& .alarm-actions': {
-                                                    opacity: 1,
-                                                    transform: 'translateY(0)'
+                                return (
+                                    <Grid item xs={12} sm={6} lg={4} key={rule.rule_id || rule.id}>
+                                        <motion.div
+                                            initial={{ opacity: 0, y: 20 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            transition={{ delay: index * 0.1 }}
+                                            whileHover={{ y: -4 }}
+                                        >
+                                            <Card sx={{
+                                                height: '100%',
+                                                background: isDark
+                                                    ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                                                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+                                                border: isActive ?
+                                                    `2px solid ${rule.severity === 'critical' ? '#ef4444' : '#f59e0b'}` :
+                                                    isDark ? '1px solid #475569' : '1px solid #e2e8f0',
+                                                cursor: 'pointer',
+                                                transition: 'all 0.3s ease-in-out',
+                                                animation: isActive && rule.severity === 'critical' ? 'pulse 2s infinite' : 'none',
+                                                '&:hover': {
+                                                    borderColor: '#2563eb',
+                                                    boxShadow: isDark
+                                                        ? '0 20px 40px rgba(37, 99, 235, 0.2)'
+                                                        : '0 20px 40px rgba(37, 99, 235, 0.1)',
+                                                    '& .rule-actions': {
+                                                        opacity: 1,
+                                                        transform: 'translateY(0)'
+                                                    }
                                                 }
-                                            }
-                                        }}>
-                                            {/* Active alarm animation */}
-                                            {isActive && (
-                                                <Box sx={{
-                                                    position: 'absolute',
-                                                    top: 0,
-                                                    left: 0,
-                                                    right: 0,
-                                                    height: 4,
-                                                    background: 'linear-gradient(90deg, #dc2626, #ef4444)',
-                                                    animation: 'pulse 2s infinite'
-                                                }} />
-                                            )}
-
-                                            <CardContent sx={{ p: 3 }}>
-                                                {/* Rule Header */}
-                                                <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 2, mb: 2 }}>
-                                                    <Avatar sx={{
-                                                        width: 40,
-                                                        height: 40,
-                                                        background: isActive
-                                                            ? 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)'
-                                                            : `linear-gradient(135deg, ${getSeverityColor(rule.severity) === 'error' ? '#dc2626' : getSeverityColor(rule.severity) === 'warning' ? '#d97706' : '#2563eb'} 0%, ${getSeverityColor(rule.severity) === 'error' ? '#ef4444' : getSeverityColor(rule.severity) === 'warning' ? '#f59e0b' : '#3b82f6'} 100%)`,
-                                                        animation: isActive ? 'pulse 2s infinite' : 'none'
+                                            }}>
+                                                {/* Active Alarm Banner */}
+                                                {isActive && (
+                                                    <Box sx={{
+                                                        p: 1,
+                                                        background: rule.severity === 'critical' ?
+                                                            'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)' :
+                                                            'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+                                                        color: 'white',
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        gap: 1
                                                     }}>
                                                         <SeverityIcon fontSize="small" />
-                                                    </Avatar>
-                                                    <Box sx={{ flex: 1, minWidth: 0 }}>
-                                                        <Typography variant="h6" sx={{
-                                                            fontWeight: 700,
-                                                            color: 'text.primary',
-                                                            overflow: 'hidden',
-                                                            textOverflow: 'ellipsis',
-                                                            whiteSpace: 'nowrap',
-                                                            mb: 0.5
-                                                        }}>
-                                                            {rule.rule_name}
-                                                        </Typography>
-                                                        <Stack direction="row" spacing={1} flexWrap="wrap">
-                                                            <Chip
-                                                                label={rule.severity || 'warning'}
-                                                                color={getSeverityColor(rule.severity)}
-                                                                size="small"
-                                                                sx={{ fontWeight: 600, textTransform: 'uppercase' }}
-                                                            />
-                                                            <Chip
-                                                                label={rule.condition_type || 'high'}
-                                                                color={getConditionTypeColor(rule.condition_type)}
-                                                                size="small"
-                                                                sx={{ fontWeight: 600 }}
-                                                            />
-                                                            {!rule.enabled && (
-                                                                <Chip
-                                                                    label="DISABLED"
-                                                                    color="default"
-                                                                    size="small"
-                                                                    sx={{ fontWeight: 600 }}
-                                                                />
-                                                            )}
-                                                        </Stack>
-                                                    </Box>
-                                                </Box>
-
-                                                {/* Rule Status */}
-                                                {isActive ? (
-                                                    <Box sx={{
-                                                        p: 2,
-                                                        borderRadius: 2,
-                                                        background: 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)',
-                                                        color: 'white',
-                                                        mb: 2
-                                                    }}>
-                                                        <Typography variant="caption" sx={{ opacity: 0.9 }}>
-                                                            🚨 ALARM ACTIVE
-                                                        </Typography>
-                                                        <Typography variant="h6" sx={{ fontWeight: 800, lineHeight: 1 }}>
-                                                            Condition Met
-                                                        </Typography>
-                                                        <Typography variant="caption" sx={{ opacity: 0.8 }}>
-                                                            {alarmCondition.message}
-                                                        </Typography>
-                                                    </Box>
-                                                ) : alarmCondition.status === 'normal' && rule.enabled ? (
-                                                    <Box sx={{
-                                                        p: 2,
-                                                        borderRadius: 2,
-                                                        background: isDark ? 'rgba(34, 197, 94, 0.1)' : '#f0fdf4',
-                                                        border: isDark ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid #bbf7d0',
-                                                        mb: 2,
-                                                        textAlign: 'center'
-                                                    }}>
-                                                        <CheckCircleIcon sx={{ color: 'success.main', mb: 1 }} />
-                                                        <Typography variant="body2" color="text.secondary">
-                                                            Normal - {alarmCondition.message}
-                                                        </Typography>
-                                                    </Box>
-                                                ) : (
-                                                    <Box sx={{
-                                                        p: 2,
-                                                        borderRadius: 2,
-                                                        background: isDark ? 'rgba(156, 163, 175, 0.1)' : '#f9fafb',
-                                                        border: isDark ? '1px solid rgba(156, 163, 175, 0.3)' : '1px solid #d1d5db',
-                                                        mb: 2,
-                                                        textAlign: 'center'
-                                                    }}>
-                                                        <InfoIcon sx={{ color: 'text.secondary', mb: 1 }} />
-                                                        <Typography variant="body2" color="text.secondary">
-                                                            {!rule.enabled ? 'Rule disabled' : alarmCondition.message}
+                                                        <Typography variant="caption" sx={{ fontWeight: 600 }}>
+                                                            ALARM TRIGGERED
                                                         </Typography>
                                                     </Box>
                                                 )}
 
-                                                {/* Rule Details */}
-                                                <Box sx={{ mb: 2 }}>
-                                                    <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
-                                                        <Typography variant="body2" color="text.secondary">
-                                                            <strong>Tag:</strong> {rule.tag_name}
-                                                        </Typography>
-                                                        <Chip
-                                                            icon={<DeviceIcon fontSize="small" />}
-                                                            label={rule.device_name}
-                                                            size="small"
-                                                            variant="outlined"
-                                                            sx={{ fontSize: '0.7rem' }}
-                                                        />
-                                                    </Stack>
-                                                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                                                        <strong>Threshold:</strong> {rule.threshold} ({rule.condition_type})
-                                                    </Typography>
-                                                    {rule.deadband > 0 && (
-                                                        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                                                            <strong>Deadband:</strong> ±{rule.deadband}
-                                                        </Typography>
-                                                    )}
-                                                    {rule.delay_seconds > 0 && (
-                                                        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                                                            <strong>Delay:</strong> {rule.delay_seconds}s
-                                                        </Typography>
-                                                    )}
-                                                    {rule.message && (
-                                                        <Typography variant="body2" color="text.secondary">
-                                                            <strong>Message:</strong> {rule.message}
-                                                        </Typography>
-                                                    )}
-                                                    {measurements[rule.tag_id] && (
-                                                        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                                                            <strong>Current Value:</strong> {measurements[rule.tag_id].value.toFixed(2)}
-                                                            <Chip
-                                                                label="LIVE"
-                                                                size="small"
-                                                                color="success"
-                                                                sx={{ ml: 1, fontSize: '0.6rem', height: 16 }}
-                                                            />
-                                                        </Typography>
-                                                    )}
-                                                </Box>
+                                                <CardContent sx={{ p: 3 }}>
+                                                    {/* Rule Header */}
+                                                    <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 2, mb: 2 }}>
+                                                        <Badge
+                                                            badgeContent={
+                                                                isActive ? '!' :
+                                                                    !rule.enabled ? '!' :
+                                                                        condition.status === 'condition_met' ? '●' :
+                                                                            condition.status === 'no_data' ? '?' : ''
+                                                            }
+                                                            color={
+                                                                isActive ? 'error' :
+                                                                    !rule.enabled ? 'default' :
+                                                                        condition.status === 'condition_met' ? 'warning' :
+                                                                            condition.status === 'no_data' ? 'info' : 'success'
+                                                            }
+                                                        >
+                                                            <Avatar sx={{
+                                                                width: 40,
+                                                                height: 40,
+                                                                background: `linear-gradient(135deg, ${
+                                                                    rule.severity === 'critical' ? '#ef4444' :
+                                                                        rule.severity === 'warning' ? '#f59e0b' :
+                                                                            rule.severity === 'info' ? '#0891b2' : '#6b7280'
+                                                                } 0%, ${
+                                                                    rule.severity === 'critical' ? '#dc2626' :
+                                                                        rule.severity === 'warning' ? '#d97706' :
+                                                                            rule.severity === 'info' ? '#06b6d4' : '#9ca3af'
+                                                                } 100%)`
+                                                            }}>
+                                                                <SeverityIcon fontSize="small" />
+                                                            </Avatar>
+                                                        </Badge>
+                                                        <Box sx={{ flex: 1, minWidth: 0 }}>
+                                                            <Typography variant="h6" sx={{
+                                                                fontWeight: 700,
+                                                                color: isActive ?
+                                                                    (rule.severity === 'critical' ? 'error.main' : 'warning.main') :
+                                                                    'text.primary',
+                                                                overflow: 'hidden',
+                                                                textOverflow: 'ellipsis',
+                                                                whiteSpace: 'nowrap',
+                                                                mb: 0.5
+                                                            }}>
+                                                                {rule.rule_name}
+                                                            </Typography>
+                                                            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                                                                <Chip
+                                                                    label={rule.severity?.toUpperCase()}
+                                                                    color={getSeverityColor(rule.severity)}
+                                                                    size="small"
+                                                                    sx={{ fontWeight: 600 }}
+                                                                />
+                                                                <Chip
+                                                                    label={rule.condition_type?.toUpperCase()}
+                                                                    color={getConditionTypeColor(rule.condition_type)}
+                                                                    size="small"
+                                                                    sx={{ fontWeight: 600 }}
+                                                                />
+                                                                {!rule.enabled && (
+                                                                    <Chip
+                                                                        label="DISABLED"
+                                                                        color="default"
+                                                                        size="small"
+                                                                        sx={{ fontWeight: 600 }}
+                                                                    />
+                                                                )}
+                                                            </Stack>
+                                                        </Box>
+                                                    </Box>
 
-                                                {/* Action Buttons */}
-                                                <Box className="alarm-actions" sx={{
-                                                    display: 'flex',
-                                                    justifyContent: 'space-between',
-                                                    alignItems: 'center',
-                                                    opacity: 0,
-                                                    transform: 'translateY(10px)',
-                                                    transition: 'all 0.3s ease-in-out'
-                                                }}>
-                                                    <Box sx={{ display: 'flex', gap: 1 }}>
-                                                        <Tooltip title="Edit Rule">
-                                                            <IconButton
-                                                                size="small"
-                                                                onClick={e => {
-                                                                    e.stopPropagation();
-                                                                    openEdit(rule);
-                                                                }}
-                                                                sx={{
-                                                                    bgcolor: isDark ? 'rgba(59, 130, 246, 0.1)' : 'primary.50',
-                                                                    color: 'primary.main',
-                                                                    '&:hover': { bgcolor: isDark ? 'rgba(59, 130, 246, 0.2)' : 'primary.100' }
-                                                                }}
-                                                            >
-                                                                <EditIcon fontSize="small" />
-                                                            </IconButton>
-                                                        </Tooltip>
-                                                        <Tooltip title="Delete Rule">
-                                                            <IconButton
-                                                                size="small"
-                                                                onClick={e => {
-                                                                    e.stopPropagation();
-                                                                    setCurrent(rule);
-                                                                    setDeleteOpen(true);
-                                                                }}
-                                                                sx={{
-                                                                    bgcolor: isDark ? 'rgba(239, 68, 68, 0.1)' : 'error.50',
-                                                                    color: 'error.main',
-                                                                    '&:hover': { bgcolor: isDark ? 'rgba(239, 68, 68, 0.2)' : 'error.100' }
-                                                                }}
-                                                            >
-                                                                <DeleteIcon fontSize="small" />
-                                                            </IconButton>
-                                                        </Tooltip>
+                                                    {/* Current Status */}
+                                                    <Box sx={{
+                                                        p: 2,
+                                                        borderRadius: 2,
+                                                        background: condition.status === 'condition_met' ?
+                                                            'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' :
+                                                            condition.status === 'no_data' ?
+                                                                'linear-gradient(135deg, #6b7280 0%, #9ca3af 100%)' :
+                                                                'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                                                        color: 'white',
+                                                        mb: 2
+                                                    }}>
+                                                        <Typography variant="caption" sx={{ opacity: 0.9 }}>
+                                                            Current Status
+                                                        </Typography>
+                                                        <Typography variant="body2" sx={{ fontWeight: 700, lineHeight: 1 }}>
+                                                            {condition.message}
+                                                        </Typography>
+                                                    </Box>
 
-                                                        {/* TEST ALARM SOUND BUTTON */}
-                                                        <Tooltip title="Test Alarm Sound">
+                                                    {/* Rule Details */}
+                                                    <Box sx={{ mb: 2 }}>
+                                                        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                                                            <strong>Tag:</strong> {rule.tag_name || 'Unknown'}
+                                                        </Typography>
+                                                        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                                                            <strong>Device:</strong> {rule.device_name || 'Unknown'}
+                                                        </Typography>
+                                                        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                                                            <strong>Threshold:</strong> {rule.threshold}
+                                                        </Typography>
+                                                        {rule.deadband > 0 && (
+                                                            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                                                                <strong>Deadband:</strong> ±{rule.deadband}
+                                                            </Typography>
+                                                        )}
+                                                        {rule.delay_seconds > 0 && (
+                                                            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                                                                <strong>Delay:</strong> {rule.delay_seconds}s
+                                                            </Typography>
+                                                        )}
+                                                        {rule.message && (
+                                                            <Typography variant="caption" color="text.secondary" sx={{
+                                                                display: 'block',
+                                                                fontStyle: 'italic',
+                                                                mt: 1,
+                                                                p: 1,
+                                                                bgcolor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
+                                                                borderRadius: 1
+                                                            }}>
+                                                                "{rule.message}"
+                                                            </Typography>
+                                                        )}
+                                                    </Box>
+
+                                                    {/* Action Buttons */}
+                                                    <Box className="rule-actions" sx={{
+                                                        display: 'flex',
+                                                        justifyContent: 'space-between',
+                                                        alignItems: 'center',
+                                                        opacity: 0,
+                                                        transform: 'translateY(10px)',
+                                                        transition: 'all 0.3s ease-in-out'
+                                                    }}>
+                                                        <Box sx={{ display: 'flex', gap: 1 }}>
+                                                            <Tooltip title="Edit Rule">
+                                                                <IconButton
+                                                                    size="small"
+                                                                    onClick={e => { e.stopPropagation(); openEdit(rule); }}
+                                                                    sx={{
+                                                                        bgcolor: isDark ? 'rgba(59, 130, 246, 0.1)' : 'primary.50',
+                                                                        color: 'primary.main',
+                                                                        '&:hover': { bgcolor: isDark ? 'rgba(59, 130, 246, 0.2)' : 'primary.100' }
+                                                                    }}
+                                                                >
+                                                                    <EditIcon fontSize="small" />
+                                                                </IconButton>
+                                                            </Tooltip>
+                                                            <Tooltip title="Delete Rule">
+                                                                <IconButton
+                                                                    size="small"
+                                                                    onClick={e => { e.stopPropagation(); setCurrent(rule); setDeleteOpen(true); }}
+                                                                    sx={{
+                                                                        bgcolor: isDark ? 'rgba(239, 68, 68, 0.1)' : 'error.50',
+                                                                        color: 'error.main',
+                                                                        '&:hover': { bgcolor: isDark ? 'rgba(239, 68, 68, 0.2)' : 'error.100' }
+                                                                    }}
+                                                                >
+                                                                    <DeleteIcon fontSize="small" />
+                                                                </IconButton>
+                                                            </Tooltip>
+                                                        </Box>
+
+                                                        <Tooltip title="View Tag Trends">
                                                             <IconButton
                                                                 size="small"
                                                                 onClick={e => {
                                                                     e.stopPropagation();
-                                                                    playTestSound(rule.severity || 'warning');
+                                                                    navigate(`/project/${projectId}/measurements?tag=${rule.tag_id}`);
                                                                 }}
                                                                 sx={{
                                                                     bgcolor: isDark ? 'rgba(14, 165, 233, 0.1)' : 'info.50',
                                                                     color: 'info.main',
                                                                     '&:hover': { bgcolor: isDark ? 'rgba(14, 165, 233, 0.2)' : 'info.100' }
                                                                 }}
-                                                                disabled={!soundEnabled}
                                                             >
-                                                                <VolumeUpIcon fontSize="small" />
+                                                                <AssessmentIcon fontSize="small" />
                                                             </IconButton>
                                                         </Tooltip>
                                                     </Box>
+                                                </CardContent>
+                                            </Card>
+                                        </motion.div>
+                                    </Grid>
+                                );
+                            })
+                        )}
+                    </Grid>
+                </TabPanel>
 
-                                                    {isActive && (
-                                                        <Tooltip title="Acknowledge Alarm">
-                                                            <IconButton
+                <TabPanel value={currentTab} index={1}>
+                    {/* Active Alarms Tab */}
+                    <Grid container spacing={3}>
+                        {currentActiveAlarms.length === 0 ? (
+                            <Grid item xs={12}>
+                                <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+                                    <Paper sx={{
+                                        p: 6,
+                                        textAlign: 'center',
+                                        background: isDark
+                                            ? 'linear-gradient(135deg, #10b981 0%, #34d399 100%)'
+                                            : 'linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%)',
+                                        border: '2px solid #10b981',
+                                        color: isDark ? 'white' : '#065f46'
+                                    }}>
+                                        <CheckCircleIcon sx={{ fontSize: 64, mb: 2 }} />
+                                        <Typography variant="h5" gutterBottom sx={{ fontWeight: 600 }}>
+                                            🎉 All Clear!
+                                        </Typography>
+                                        <Typography variant="body1" sx={{ mb: 3 }}>
+                                            No active alarms detected. All systems operating normally.
+                                        </Typography>
+                                        <Button
+                                            variant="outlined"
+                                            onClick={() => setCurrentTab(0)}
+                                            sx={{ borderColor: 'currentColor', color: 'inherit' }}
+                                        >
+                                            View Alarm Rules
+                                        </Button>
+                                    </Paper>
+                                </motion.div>
+                            </Grid>
+                        ) : (
+                            currentActiveAlarms.map((alarm, index) => {
+                                const SeverityIcon = getSeverityIcon(alarm.severity);
+
+                                return (
+                                    <Grid item xs={12} sm={6} lg={4} key={alarm.rule_id || alarm.id}>
+                                        <motion.div
+                                            initial={{ opacity: 0, y: 20 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            transition={{ delay: index * 0.1 }}
+                                            whileHover={{ y: -4 }}
+                                        >
+                                            <Card sx={{
+                                                height: '100%',
+                                                background: isDark
+                                                    ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                                                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+                                                border: `2px solid ${alarm.severity === 'critical' ? '#ef4444' : '#f59e0b'}`,
+                                                animation: alarm.severity === 'critical' ? 'pulse 2s infinite' : 'none',
+                                                '&:hover': {
+                                                    '& .alarm-actions': {
+                                                        opacity: 1,
+                                                        transform: 'translateY(0)'
+                                                    }
+                                                }
+                                            }}>
+                                                {/* Alarm Header */}
+                                                <Box sx={{
+                                                    p: 2,
+                                                    background: alarm.severity === 'critical' ?
+                                                        'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)' :
+                                                        'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+                                                    color: 'white'
+                                                }}>
+                                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                                                        <SeverityIcon fontSize="small" />
+                                                        <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                                                            {alarm.rule_name}
+                                                        </Typography>
+                                                        {alarm.source && (
+                                                            <Chip
+                                                                label={alarm.source.toUpperCase()}
                                                                 size="small"
-                                                                onClick={e => {
-                                                                    e.stopPropagation();
-                                                                    openAcknowledge(rule);
-                                                                }}
                                                                 sx={{
-                                                                    bgcolor: isDark ? 'rgba(245, 158, 11, 0.1)' : 'warning.50',
-                                                                    color: 'warning.main',
-                                                                    '&:hover': { bgcolor: isDark ? 'rgba(245, 158, 11, 0.2)' : 'warning.100' }
+                                                                    bgcolor: 'rgba(255,255,255,0.2)',
+                                                                    color: 'white',
+                                                                    fontSize: '0.6rem'
                                                                 }}
-                                                            >
-                                                                <CheckIcon fontSize="small" />
-                                                            </IconButton>
-                                                        </Tooltip>
-                                                    )}
-                                                </Box>
-                                            </CardContent>
-                                        </Card>
-                                    </motion.div>
-                                </Grid>
-                            );
-                        })}
-                    </AnimatePresence>
-                </Grid>
-            </TabPanel>
-
-            {/* Tab Panel 1: Active Alarms */}
-            <TabPanel value={currentTab} index={1}>
-                {currentActiveAlarms.length === 0 ? (
-                    <Paper sx={{
-                        p: 6,
-                        textAlign: 'center',
-                        background: isDark
-                            ? 'linear-gradient(135deg, #064e3b 0%, #065f46 100%)'
-                            : 'linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)',
-                        border: isDark ? '2px solid #059669' : '2px solid #bbf7d0'
-                    }}>
-                        <CheckCircleIcon sx={{ fontSize: 64, color: 'success.main', mb: 2 }} />
-                        <Typography variant="h5" gutterBottom sx={{ fontWeight: 600, color: 'success.main' }}>
-                            All Systems Normal
-                        </Typography>
-                        <Typography variant="body1" color="text.secondary">
-                            No active alarms at this time. All monitored conditions are within normal ranges.
-                        </Typography>
-                    </Paper>
-                ) : (
-                    <Grid container spacing={3}>
-                        {currentActiveAlarms.map((alarm, index) => {
-                            const alarmRuleId = alarm.rule_id || alarm.id;
-                            return (
-                                <Grid item xs={12} key={`${alarmRuleId}-${index}`}>
-                                    <motion.div
-                                        initial={{ opacity: 0, x: -20 }}
-                                        animate={{ opacity: 1, x: 0 }}
-                                        transition={{ delay: index * 0.1 }}
-                                    >
-                                        <Card sx={{
-                                            background: isDark
-                                                ? 'linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%)'
-                                                : 'linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%)',
-                                            border: '2px solid #dc2626',
-                                            animation: alarm.state === 'triggered' ? 'pulse 2s infinite' : 'none'
-                                        }}>
-                                            <CardContent sx={{ p: 3 }}>
-                                                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                                                    <Box sx={{ flex: 1 }}>
-                                                        <Typography variant="h6" sx={{ fontWeight: 700, mb: 1, color: 'error.main' }}>
-                                                            🚨 {alarm.rule_name}
-                                                        </Typography>
-                                                        <Typography variant="body1" sx={{ mb: 2 }}>
-                                                            {alarm.tag_name} on {alarm.device_name}
-                                                        </Typography>
-                                                        <Stack direction="row" spacing={2} sx={{ mb: 2 }}>
-                                                            <Chip
-                                                                label={alarm.severity?.toUpperCase()}
-                                                                color={getSeverityColor(alarm.severity)}
-                                                                sx={{ fontWeight: 600 }}
                                                             />
-                                                            <Chip
-                                                                label={alarm.state?.toUpperCase() || 'TRIGGERED'}
-                                                                color={alarm.state === 'triggered' ? 'error' : 'warning'}
-                                                                sx={{ fontWeight: 600 }}
-                                                            />
-                                                            <Chip
-                                                                label={`Triggered: ${new Date(alarm.triggered_at).toLocaleString()}`}
-                                                                variant="outlined"
-                                                            />
-                                                        </Stack>
-                                                        <Typography variant="body2" color="text.secondary">
-                                                            Threshold: {alarm.threshold} | Current: {alarm.trigger_value}
-                                                        </Typography>
-                                                    </Box>
-                                                    <Box>
-                                                        {/* MANUAL SOUND TRIGGER BUTTON */}
-                                                        <Button
-                                                            variant="outlined"
-                                                            size="small"
-                                                            startIcon={<VolumeUpIcon />}
-                                                            onClick={() => {
-                                                                playAlarmSequence(alarm.severity || 'warning', {
-                                                                    rule_name: alarm.rule_name,
-                                                                    tag_name: alarm.tag_name,
-                                                                    device_name: alarm.device_name,
-                                                                    trigger_value: alarm.trigger_value
-                                                                });
-                                                            }}
-                                                            sx={{ mr: 1 }}
-                                                            disabled={!soundEnabled}
-                                                        >
-                                                            Play Sound
-                                                        </Button>
-
-                                                        {(alarm.state === 'triggered' || !alarm.acknowledged_at) && (
-                                                            <Button
-                                                                variant="contained"
-                                                                color="warning"
-                                                                startIcon={<CheckIcon />}
-                                                                onClick={() => openAcknowledge(alarm)}
-                                                                sx={{ mr: 1 }}
-                                                            >
-                                                                Acknowledge
-                                                            </Button>
                                                         )}
+                                                    </Box>
+                                                    <Typography variant="caption" sx={{ opacity: 0.9 }}>
+                                                        {alarm.severity?.toUpperCase()} ALARM • {alarm.condition_type?.toUpperCase()}
+                                                    </Typography>
+                                                </Box>
+
+                                                <CardContent sx={{ p: 3 }}>
+                                                    {/* Alarm Details */}
+                                                    <Box sx={{ mb: 3 }}>
+                                                        <Typography variant="body1" sx={{ fontWeight: 600, mb: 1 }}>
+                                                            Current Value: {alarm.trigger_value !== null && alarm.trigger_value !== undefined ?
+                                                            alarm.trigger_value.toFixed(2) : 'N/A'}
+                                                        </Typography>
+                                                        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                                                            <strong>Threshold:</strong> {alarm.threshold}
+                                                        </Typography>
+                                                        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                                                            <strong>Tag:</strong> {alarm.tag_name || 'Unknown'}
+                                                        </Typography>
+                                                        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                                                            <strong>Device:</strong> {alarm.device_name || 'Unknown'}
+                                                        </Typography>
+                                                        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                                                            <strong>Triggered:</strong> {alarm.triggered_at ?
+                                                            new Date(alarm.triggered_at).toLocaleString() :
+                                                            'Unknown'
+                                                        }
+                                                        </Typography>
+                                                        {alarm.message && (
+                                                            <Typography variant="caption" color="text.secondary" sx={{
+                                                                display: 'block',
+                                                                fontStyle: 'italic',
+                                                                mt: 1,
+                                                                p: 1,
+                                                                bgcolor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
+                                                                borderRadius: 1
+                                                            }}>
+                                                                "{alarm.message}"
+                                                            </Typography>
+                                                        )}
+                                                    </Box>
+
+                                                    {/* Acknowledge Button */}
+                                                    <Box className="alarm-actions" sx={{
+                                                        opacity: 0,
+                                                        transform: 'translateY(10px)',
+                                                        transition: 'all 0.3s ease-in-out'
+                                                    }}>
                                                         <Button
-                                                            variant="outlined"
-                                                            startIcon={<HistoryIcon />}
-                                                            onClick={() => setCurrentTab(2)}
+                                                            variant="contained"
+                                                            fullWidth
+                                                            startIcon={<CheckIcon />}
+                                                            onClick={() => openAcknowledge(alarm)}
+                                                            sx={{
+                                                                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                                                                fontWeight: 600,
+                                                                py: 1.5,
+                                                                '&:hover': {
+                                                                    background: 'linear-gradient(135deg, #059669 0%, #047857 100%)'
+                                                                }
+                                                            }}
                                                         >
-                                                            View History
+                                                            Acknowledge Alarm
                                                         </Button>
                                                     </Box>
-                                                </Box>
-                                            </CardContent>
-                                        </Card>
-                                    </motion.div>
-                                </Grid>
-                            );
-                        })}
+                                                </CardContent>
+                                            </Card>
+                                        </motion.div>
+                                    </Grid>
+                                );
+                            })
+                        )}
                     </Grid>
-                )}
-            </TabPanel>
+                </TabPanel>
 
-            {/* Tab Panel 2: Event History */}
-            <TabPanel value={currentTab} index={2}>
-                <TableContainer component={Paper} sx={{
-                    background: isDark
-                        ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
-                        : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
-                }}>
-                    <Table>
-                        <TableHead>
-                            <TableRow>
-                                <TableCell>Timestamp</TableCell>
-                                <TableCell>Rule Name</TableCell>
-                                <TableCell>Tag</TableCell>
-                                <TableCell>Event Type</TableCell>
-                                <TableCell>Severity</TableCell>
-                                <TableCell>Value</TableCell>
-                                <TableCell>Message</TableCell>
-                            </TableRow>
-                        </TableHead>
-                        <TableBody>
-                            {alarmEvents
-                                .slice(eventsPage * eventsRowsPerPage, eventsPage * eventsRowsPerPage + eventsRowsPerPage)
-                                .map((event, index) => {
-                                    const eventInfo = formatEventType(event.event_type);
-                                    const EventIcon = eventInfo.icon;
-
-                                    return (
-                                        <TableRow key={index}>
-                                            <TableCell>
-                                                {new Date(event.created_at).toLocaleString()}
-                                            </TableCell>
-                                            <TableCell>{event.rule_name}</TableCell>
-                                            <TableCell>{event.tag_name}</TableCell>
-                                            <TableCell>
-                                                <Chip
-                                                    icon={<EventIcon fontSize="small" />}
-                                                    label={eventInfo.label}
-                                                    color={eventInfo.color}
-                                                    size="small"
-                                                    sx={{ fontWeight: 600 }}
-                                                />
-                                            </TableCell>
-                                            <TableCell>
-                                                <Chip
-                                                    label={event.severity?.toUpperCase()}
-                                                    color={getSeverityColor(event.severity)}
-                                                    size="small"
-                                                />
-                                            </TableCell>
-                                            <TableCell>
-                                                {event.trigger_value !== null && event.trigger_value !== undefined ? event.trigger_value.toFixed(2) : '-'}
-                                            </TableCell>
-                                            <TableCell>{event.message}</TableCell>
-                                        </TableRow>
-                                    );
-                                })}
-                        </TableBody>
-                    </Table>
-                    <TablePagination
-                        component="div"
-                        count={alarmEvents.length}
-                        page={eventsPage}
-                        onPageChange={(e, newPage) => setEventsPage(newPage)}
-                        rowsPerPage={eventsRowsPerPage}
-                        onRowsPerPageChange={(e) => {
-                            setEventsRowsPerPage(parseInt(e.target.value, 10));
-                            setEventsPage(0);
-                        }}
-                    />
-                </TableContainer>
-            </TabPanel>
-
-            {/* Tab Panel 3: Statistics */}
-            <TabPanel value={currentTab} index={3}>
-                {alarmStats ? (
-                    <Grid container spacing={3}>
-                        <Grid item xs={12} md={6}>
-                            <Card sx={{
-                                background: isDark
-                                    ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
-                                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
-                            }}>
-                                <CardContent>
-                                    <Typography variant="h6" gutterBottom>
-                                        Alarm Rules Summary
-                                    </Typography>
-                                    <List>
-                                        <ListItem>
-                                            <ListItemText
-                                                primary={`Total Rules: ${alarmStats.rules?.total_rules || 0}`}
-                                                secondary={`Enabled: ${alarmStats.rules?.enabled_rules || 0} | Disabled: ${alarmStats.rules?.disabled_rules || 0}`}
-                                            />
-                                        </ListItem>
-                                        <ListItem>
-                                            <ListItemText
-                                                primary="By Severity"
-                                                secondary={`Critical: ${alarmStats.rules?.critical_rules || 0} | Warning: ${alarmStats.rules?.warning_rules || 0} | Info: ${alarmStats.rules?.info_rules || 0}`}
-                                            />
-                                        </ListItem>
-                                    </List>
-                                </CardContent>
-                            </Card>
-                        </Grid>
-                        <Grid item xs={12} md={6}>
-                            <Card sx={{
-                                background: isDark
-                                    ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
-                                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
-                            }}>
-                                <CardContent>
-                                    <Typography variant="h6" gutterBottom>
-                                        Active Alarms Summary
-                                    </Typography>
-                                    <List>
-                                        <ListItem>
-                                            <ListItemText
-                                                primary={`Total Active: ${alarmStats.active_alarms?.total_active || 0}`}
-                                                secondary={`Unacknowledged: ${alarmStats.active_alarms?.unacknowledged || 0} | Acknowledged: ${alarmStats.active_alarms?.acknowledged || 0}`}
-                                            />
-                                        </ListItem>
-                                    </List>
-                                </CardContent>
-                            </Card>
-                        </Grid>
-                        <Grid item xs={12}>
-                            <Card sx={{
-                                background: isDark
-                                    ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
-                                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
-                            }}>
-                                <CardContent>
-                                    <Typography variant="h6" gutterBottom>
-                                        24-Hour Activity
-                                    </Typography>
-                                    <List>
-                                        <ListItem>
-                                            <ListItemText
-                                                primary={`Total Events: ${alarmStats.events_24h?.total_events_24h || 0}`}
-                                                secondary={`Triggered: ${alarmStats.events_24h?.triggered_24h || 0} | Acknowledged: ${alarmStats.events_24h?.acknowledged_24h || 0} | Cleared: ${alarmStats.events_24h?.cleared_24h || 0}`}
-                                            />
-                                        </ListItem>
-                                    </List>
-                                </CardContent>
-                            </Card>
-                        </Grid>
-                    </Grid>
-                ) : (
-                    <Paper sx={{
-                        p: 3,
-                        textAlign: 'center',
+                <TabPanel value={currentTab} index={2}>
+                    {/* Event History Tab */}
+                    <TableContainer component={Paper} sx={{
                         background: isDark
                             ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
-                            : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                            : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+                        border: isDark ? '1px solid #475569' : '1px solid #e2e8f0'
                     }}>
-                        <Typography variant="body1" color="text.secondary">
-                            Loading alarm statistics...
-                        </Typography>
-                    </Paper>
-                )}
-            </TabPanel>
+                        <Table>
+                            <TableHead>
+                                <TableRow>
+                                    <TableCell sx={{ fontWeight: 600 }}>Event Type</TableCell>
+                                    <TableCell sx={{ fontWeight: 600 }}>Rule Name</TableCell>
+                                    <TableCell sx={{ fontWeight: 600 }}>Value</TableCell>
+                                    <TableCell sx={{ fontWeight: 600 }}>Timestamp</TableCell>
+                                    <TableCell sx={{ fontWeight: 600 }}>Message</TableCell>
+                                </TableRow>
+                            </TableHead>
+                            <TableBody>
+                                {displayAlarmEvents
+                                    .slice(eventsPage * eventsRowsPerPage, eventsPage * eventsRowsPerPage + eventsRowsPerPage)
+                                    .map((event, index) => {
+                                        const eventTypeInfo = formatEventType(event.event_type || event.type);
+                                        const EventIcon = eventTypeInfo.icon;
 
-            {/* Add Alarm Rule FAB */}
+                                        return (
+                                            <TableRow key={index} sx={{
+                                                '&:nth-of-type(odd)': {
+                                                    backgroundColor: isDark ? 'rgba(255, 255, 255, 0.02)' : 'rgba(0, 0, 0, 0.02)'
+                                                }
+                                            }}>
+                                                <TableCell>
+                                                    <Chip
+                                                        icon={<EventIcon fontSize="small" />}
+                                                        label={eventTypeInfo.label}
+                                                        color={eventTypeInfo.color}
+                                                        size="small"
+                                                        sx={{ fontWeight: 600 }}
+                                                    />
+                                                </TableCell>
+                                                <TableCell sx={{ fontWeight: 600 }}>
+                                                    {event.rule_name}
+                                                </TableCell>
+                                                <TableCell>
+                                                    {event.trigger_value !== null && event.trigger_value !== undefined
+                                                        ? event.trigger_value.toFixed(2)
+                                                        : 'N/A'
+                                                    }
+                                                </TableCell>
+                                                <TableCell>
+                                                    {new Date(event.timestamp || event.created_at).toLocaleString()}
+                                                </TableCell>
+                                                <TableCell>
+                                                    {event.message || event.ack_message || '-'}
+                                                </TableCell>
+                                            </TableRow>
+                                        );
+                                    })}
+                            </TableBody>
+                        </Table>
+                        <TablePagination
+                            rowsPerPageOptions={[10, 25, 50, 100]}
+                            component="div"
+                            count={displayAlarmEvents.length}
+                            rowsPerPage={eventsRowsPerPage}
+                            page={eventsPage}
+                            onPageChange={(e, newPage) => setEventsPage(newPage)}
+                            onRowsPerPageChange={(e) => {
+                                setEventsRowsPerPage(parseInt(e.target.value, 10));
+                                setEventsPage(0);
+                            }}
+                        />
+                    </TableContainer>
+                </TabPanel>
+
+                <TabPanel value={currentTab} index={3}>
+                    {/* Statistics Tab */}
+                    <Grid container spacing={3}>
+                        <Grid item xs={12}>
+                            <Typography variant="h5" sx={{ fontWeight: 600, mb: 3 }}>
+                                📊 Simplified Alarm System Statistics
+                            </Typography>
+                        </Grid>
+
+                        {/* Rules Statistics */}
+                        <Grid item xs={12} md={6}>
+                            <Card sx={{
+                                background: isDark
+                                    ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+                                border: isDark ? '1px solid #475569' : '1px solid #e2e8f0'
+                            }}>
+                                <CardContent>
+                                    <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
+                                        Alarm Rules
+                                    </Typography>
+                                    <Stack spacing={2}>
+                                        <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                                            <Typography>Total Rules:</Typography>
+                                            <Typography sx={{ fontWeight: 600 }}>
+                                                {effectiveStats?.rules?.total_rules || 0}
+                                            </Typography>
+                                        </Box>
+                                        <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                                            <Typography>Enabled Rules:</Typography>
+                                            <Typography sx={{ fontWeight: 600, color: 'success.main' }}>
+                                                {effectiveStats?.rules?.enabled_rules || 0}
+                                            </Typography>
+                                        </Box>
+                                        <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                                            <Typography>Critical Rules:</Typography>
+                                            <Typography sx={{ fontWeight: 600, color: 'error.main' }}>
+                                                {effectiveStats?.rules?.critical_rules || 0}
+                                            </Typography>
+                                        </Box>
+                                        <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                                            <Typography>Warning Rules:</Typography>
+                                            <Typography sx={{ fontWeight: 600, color: 'warning.main' }}>
+                                                {effectiveStats?.rules?.warning_rules || 0}
+                                            </Typography>
+                                        </Box>
+                                    </Stack>
+                                </CardContent>
+                            </Card>
+                        </Grid>
+
+                        {/* Detection Statistics */}
+                        <Grid item xs={12} md={6}>
+                            <Card sx={{
+                                background: isDark
+                                    ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                                    : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+                                border: isDark ? '1px solid #475569' : '1px solid #e2e8f0'
+                            }}>
+                                <CardContent>
+                                    <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
+                                        Detection Status
+                                    </Typography>
+                                    <Stack spacing={2}>
+                                        <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                                            <Typography>Active Alarms:</Typography>
+                                            <Typography sx={{ fontWeight: 600, color: currentActiveAlarms.length > 0 ? 'error.main' : 'success.main' }}>
+                                                {currentActiveAlarms.length}
+                                            </Typography>
+                                        </Box>
+                                        <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                                            <Typography>WebSocket Alarms:</Typography>
+                                            <Typography sx={{ fontWeight: 600 }}>
+                                                {wsActiveAlarms?.length || 0}
+                                            </Typography>
+                                        </Box>
+                                        <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                                            <Typography>API Alarms:</Typography>
+                                            <Typography sx={{ fontWeight: 600 }}>
+                                                {activeAlarms?.length || 0}
+                                            </Typography>
+                                        </Box>
+                                        <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                                            <Typography>Detection Mode:</Typography>
+                                            <Typography sx={{ fontWeight: 600, color: 'success.main' }}>
+                                                SIMPLIFIED
+                                            </Typography>
+                                        </Box>
+                                    </Stack>
+                                </CardContent>
+                            </Card>
+                        </Grid>
+                    </Grid>
+                </TabPanel>
+            </Paper>
+
+            {/* Add Alarm FAB */}
             <Fab
                 color="primary"
-                aria-label="add alarm rule"
-                onClick={() => {
-                    resetForm();
-                    setAddOpen(true);
-                }}
+                onClick={() => { resetForm(); setAddOpen(true); }}
                 sx={{
                     position: 'fixed',
                     bottom: 32,
@@ -1611,7 +1907,7 @@ export default function AlarmsPage() {
                 <AddIcon />
             </Fab>
 
-            {/* Enhanced Add Alarm Rule Dialog */}
+            {/* Add Dialog */}
             <Dialog
                 open={addOpen}
                 onClose={() => setAddOpen(false)}
@@ -1627,104 +1923,85 @@ export default function AlarmsPage() {
                 }}
             >
                 <DialogTitle sx={{ pb: 2 }}>
-                    <Box>
-                        <Typography variant="h6" sx={{ fontWeight: 700, mb: 1 }}>
-                            Create Alarm Rule
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary">
-                            Professional SCADA alarm configuration
-                        </Typography>
-                    </Box>
+                    <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                        Create Alarm Rule
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                        Configure monitoring parameters for critical processes
+                    </Typography>
                 </DialogTitle>
                 <DialogContent sx={{ pt: 1 }}>
-                    <Grid container spacing={2}>
+                    <Grid container spacing={3}>
                         <Grid item xs={12}>
                             <TextField
-                                label="Rule Name"
+                                label="Alarm Rule Name"
                                 value={ruleName}
                                 onChange={e => setRuleName(e.target.value)}
                                 fullWidth
                                 required
                                 autoFocus
-                                sx={{ mt: 2 }}
                                 helperText="Descriptive name for this alarm rule"
                             />
                         </Grid>
 
                         <Grid item xs={12} md={6}>
-                            <FormControl fullWidth>
+                            <FormControl fullWidth required>
                                 <InputLabel>Device</InputLabel>
                                 <Select
                                     value={deviceId}
                                     onChange={e => {
                                         setDeviceId(e.target.value);
-                                        setTagId(''); // Reset tag when device changes
+                                        setTagId('');
                                     }}
                                     label="Device"
-                                    required
                                 >
-                                    {devices.map(device => {
-                                        const DeviceIcon = getDeviceIcon(device.device_type);
-                                        return (
-                                            <MenuItem key={device.device_id} value={device.device_id}>
-                                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                                    <DeviceIcon fontSize="small" />
-                                                    <Box>
-                                                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                                                            {device.device_name}
-                                                        </Typography>
-                                                        <Typography variant="caption" color="text.secondary">
-                                                            {device.device_type}
-                                                        </Typography>
-                                                    </Box>
+                                    {devices.map(device => (
+                                        <MenuItem key={device.device_id} value={device.device_id}>
+                                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                {React.createElement(getDeviceIcon(device.device_type), { fontSize: 'small' })}
+                                                <Box>
+                                                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                                        {device.device_name}
+                                                    </Typography>
+                                                    <Typography variant="caption" color="text.secondary">
+                                                        {device.device_type?.toUpperCase()}
+                                                    </Typography>
                                                 </Box>
-                                            </MenuItem>
-                                        );
-                                    })}
+                                            </Box>
+                                        </MenuItem>
+                                    ))}
                                 </Select>
                             </FormControl>
                         </Grid>
 
                         <Grid item xs={12} md={6}>
-                            <FormControl fullWidth>
-                                <InputLabel>Tag to Monitor</InputLabel>
+                            <FormControl fullWidth required>
+                                <InputLabel>Tag</InputLabel>
                                 <Select
                                     value={tagId}
                                     onChange={e => setTagId(e.target.value)}
-                                    label="Tag to Monitor"
-                                    required
+                                    label="Tag"
                                     disabled={!deviceId}
                                 >
-                                    {tags.filter(tag => tag.device_id === parseInt(deviceId)).map(tag => {
-                                        const hasRealTimeData = measurements[tag.tag_id]?.value !== null && measurements[tag.tag_id]?.value !== undefined;
-                                        return (
+                                    {tags
+                                        .filter(tag => tag.device_id === parseInt(deviceId))
+                                        .map(tag => (
                                             <MenuItem key={tag.tag_id} value={tag.tag_id}>
-                                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
-                                                    <Box sx={{ flex: 1 }}>
-                                                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                                                            {tag.tag_name}
-                                                        </Typography>
-                                                        <Typography variant="caption" color="text.secondary">
-                                                            {tag.tag_type} • {tag.engineering_unit || 'units'}
-                                                        </Typography>
-                                                    </Box>
-                                                    {hasRealTimeData && (
-                                                        <Chip
-                                                            label={`${measurements[tag.tag_id].value.toFixed(2)} LIVE`}
-                                                            size="small"
-                                                            color="success"
-                                                            sx={{ fontSize: '0.7rem' }}
-                                                        />
-                                                    )}
+                                                <Box>
+                                                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                                        {tag.tag_name}
+                                                    </Typography>
+                                                    <Typography variant="caption" color="text.secondary">
+                                                        {tag.tag_type?.toUpperCase()} • {tag.engineering_unit || 'units'}
+                                                    </Typography>
                                                 </Box>
                                             </MenuItem>
-                                        );
-                                    })}
+                                        ))}
                                 </Select>
                             </FormControl>
                         </Grid>
 
-                        <Grid item xs={12} md={4}>
+                        <Grid item xs={12} md={6}>
                             <FormControl fullWidth>
                                 <InputLabel>Condition Type</InputLabel>
                                 <Select
@@ -1732,36 +2009,51 @@ export default function AlarmsPage() {
                                     onChange={e => setConditionType(e.target.value)}
                                     label="Condition Type"
                                 >
-                                    <MenuItem value="high">High Limit</MenuItem>
-                                    <MenuItem value="low">Low Limit</MenuItem>
-                                    <MenuItem value="change">Change Detection</MenuItem>
+                                    <MenuItem value="high">High Alarm (Value &gt; Threshold)</MenuItem>
+                                    <MenuItem value="low">Low Alarm (Value &lt; Threshold)</MenuItem>
+                                    <MenuItem value="change">Change Alarm (Deviation)</MenuItem>
                                 </Select>
                             </FormControl>
                         </Grid>
 
-                        <Grid item xs={12} md={4}>
+                        <Grid item xs={12} md={6}>
                             <TextField
-                                label="Threshold"
+                                label="Threshold Value"
                                 value={threshold}
                                 onChange={e => setThreshold(e.target.value)}
-                                type="number"
                                 fullWidth
                                 required
-                                helperText="Trigger value"
+                                type="number"
+                                helperText="Critical value that triggers the alarm"
                             />
                         </Grid>
 
-                        <Grid item xs={12} md={4}>
+                        <Grid item xs={12} md={6}>
                             <FormControl fullWidth>
-                                <InputLabel>Severity</InputLabel>
+                                <InputLabel>Severity Level</InputLabel>
                                 <Select
                                     value={severity}
                                     onChange={e => setSeverity(e.target.value)}
-                                    label="Severity"
+                                    label="Severity Level"
                                 >
-                                    <MenuItem value="info">Info</MenuItem>
-                                    <MenuItem value="warning">Warning</MenuItem>
-                                    <MenuItem value="critical">Critical</MenuItem>
+                                    <MenuItem value="critical">
+                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                            <ErrorIcon fontSize="small" color="error" />
+                                            <Typography>Critical</Typography>
+                                        </Box>
+                                    </MenuItem>
+                                    <MenuItem value="warning">
+                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                            <WarningIcon fontSize="small" color="warning" />
+                                            <Typography>Warning</Typography>
+                                        </Box>
+                                    </MenuItem>
+                                    <MenuItem value="info">
+                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                            <InfoIcon fontSize="small" color="info" />
+                                            <Typography>Info</Typography>
+                                        </Box>
+                                    </MenuItem>
                                 </Select>
                             </FormControl>
                         </Grid>
@@ -1771,22 +2063,9 @@ export default function AlarmsPage() {
                                 label="Deadband"
                                 value={deadband}
                                 onChange={e => setDeadband(e.target.value)}
-                                type="number"
                                 fullWidth
-                                helperText="Prevents alarm chattering"
-                                placeholder="0.0"
-                            />
-                        </Grid>
-
-                        <Grid item xs={12} md={6}>
-                            <TextField
-                                label="Delay (seconds)"
-                                value={delaySeconds}
-                                onChange={e => setDelaySeconds(e.target.value)}
                                 type="number"
-                                fullWidth
-                                helperText="Delay before triggering"
-                                placeholder="0"
+                                helperText="Hysteresis value to prevent chattering"
                             />
                         </Grid>
 
@@ -1798,8 +2077,7 @@ export default function AlarmsPage() {
                                 fullWidth
                                 multiline
                                 rows={2}
-                                placeholder="Custom alarm message..."
-                                helperText="Optional custom alarm message"
+                                helperText="Optional custom message for alarm notifications"
                             />
                         </Grid>
 
@@ -1812,35 +2090,9 @@ export default function AlarmsPage() {
                                         color="primary"
                                     />
                                 }
-                                label="Enable this alarm rule immediately"
+                                label="Enable Alarm Rule"
                             />
                         </Grid>
-
-                        {tagId && measurements[tagId] && (
-                            <Grid item xs={12}>
-                                <Alert severity="info" sx={{ mt: 1 }}>
-                                    <Typography variant="body2">
-                                        Current live value for this tag: <strong>{measurements[tagId].value.toFixed(2)}</strong>
-                                        {threshold && (
-                                            <span>
-                                                {' | '}Condition would be: <strong>
-                                                {(() => {
-                                                    const currentVal = measurements[tagId].value;
-                                                    const thresholdVal = parseFloat(threshold);
-                                                    switch (conditionType) {
-                                                        case 'high': return currentVal > thresholdVal ? 'TRIGGERED' : 'NORMAL';
-                                                        case 'low': return currentVal < thresholdVal ? 'TRIGGERED' : 'NORMAL';
-                                                        case 'change': return Math.abs(currentVal - thresholdVal) > (parseFloat(deadband) || 0.1) ? 'TRIGGERED' : 'NORMAL';
-                                                        default: return 'UNKNOWN';
-                                                    }
-                                                })()}
-                                                </strong>
-                                            </span>
-                                        )}
-                                    </Typography>
-                                </Alert>
-                            </Grid>
-                        )}
                     </Grid>
                 </DialogContent>
                 <DialogActions sx={{ p: 3, pt: 2 }}>
@@ -1850,19 +2102,221 @@ export default function AlarmsPage() {
                     <Button
                         onClick={handleAdd}
                         variant="contained"
-                        disabled={!ruleName.trim() || !tagId || !deviceId || !threshold}
+                        disabled={!ruleName.trim() || !tagId || !deviceId || !threshold || loading}
                         sx={{
                             borderRadius: 2,
                             px: 3,
                             background: 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)'
                         }}
                     >
-                        Create Alarm Rule
+                        {loading ? 'Creating...' : 'Create Alarm Rule'}
                     </Button>
                 </DialogActions>
             </Dialog>
 
-            {/* Edit Alarm Rule Dialog */}
+            {/* Edit Dialog */}
+            <Dialog
+                open={editOpen}
+                onClose={() => setEditOpen(false)}
+                maxWidth="md"
+                fullWidth
+                PaperProps={{
+                    sx: {
+                        borderRadius: 4,
+                        background: isDark
+                            ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                            : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                    }
+                }}
+            >
+                <DialogTitle>
+                    <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                        Edit Alarm Rule: {current?.rule_name}
+                    </Typography>
+                </DialogTitle>
+                <DialogContent>
+                    <Grid container spacing={3} sx={{ mt: 1 }}>
+                        <Grid item xs={12}>
+                            <TextField
+                                label="Alarm Rule Name"
+                                value={ruleName}
+                                onChange={e => setRuleName(e.target.value)}
+                                fullWidth
+                                required
+                            />
+                        </Grid>
+
+                        <Grid item xs={12} md={6}>
+                            <FormControl fullWidth required>
+                                <InputLabel>Device</InputLabel>
+                                <Select
+                                    value={deviceId}
+                                    onChange={e => {
+                                        setDeviceId(e.target.value);
+                                        setTagId('');
+                                    }}
+                                    label="Device"
+                                >
+                                    {devices.map(device => (
+                                        <MenuItem key={device.device_id} value={device.device_id}>
+                                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                {React.createElement(getDeviceIcon(device.device_type), { fontSize: 'small' })}
+                                                <Box>
+                                                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                                        {device.device_name}
+                                                    </Typography>
+                                                    <Typography variant="caption" color="text.secondary">
+                                                        {device.device_type?.toUpperCase()}
+                                                    </Typography>
+                                                </Box>
+                                            </Box>
+                                        </MenuItem>
+                                    ))}
+                                </Select>
+                            </FormControl>
+                        </Grid>
+
+                        <Grid item xs={12} md={6}>
+                            <FormControl fullWidth required>
+                                <InputLabel>Tag</InputLabel>
+                                <Select
+                                    value={tagId}
+                                    onChange={e => setTagId(e.target.value)}
+                                    label="Tag"
+                                    disabled={!deviceId}
+                                >
+                                    {tags
+                                        .filter(tag => tag.device_id === parseInt(deviceId))
+                                        .map(tag => (
+                                            <MenuItem key={tag.tag_id} value={tag.tag_id}>
+                                                <Box>
+                                                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                                        {tag.tag_name}
+                                                    </Typography>
+                                                    <Typography variant="caption" color="text.secondary">
+                                                        {tag.tag_type?.toUpperCase()} • {tag.engineering_unit || 'units'}
+                                                    </Typography>
+                                                </Box>
+                                            </MenuItem>
+                                        ))}
+                                </Select>
+                            </FormControl>
+                        </Grid>
+
+                        <Grid item xs={12} md={6}>
+                            <FormControl fullWidth>
+                                <InputLabel>Condition Type</InputLabel>
+                                <Select
+                                    value={conditionType}
+                                    onChange={e => setConditionType(e.target.value)}
+                                    label="Condition Type"
+                                >
+                                    <MenuItem value="high">High Alarm (Value &gt; Threshold)</MenuItem>
+                                    <MenuItem value="low">Low Alarm (Value &lt; Threshold)</MenuItem>
+                                    <MenuItem value="change">Change Alarm (Deviation)</MenuItem>
+                                </Select>
+                            </FormControl>
+                        </Grid>
+
+                        <Grid item xs={12} md={6}>
+                            <TextField
+                                label="Threshold Value"
+                                value={threshold}
+                                onChange={e => setThreshold(e.target.value)}
+                                fullWidth
+                                required
+                                type="number"
+                                helperText="Critical value that triggers the alarm"
+                            />
+                        </Grid>
+
+                        <Grid item xs={12} md={6}>
+                            <FormControl fullWidth>
+                                <InputLabel>Severity Level</InputLabel>
+                                <Select
+                                    value={severity}
+                                    onChange={e => setSeverity(e.target.value)}
+                                    label="Severity Level"
+                                >
+                                    <MenuItem value="critical">
+                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                            <ErrorIcon fontSize="small" color="error" />
+                                            <Typography>Critical</Typography>
+                                        </Box>
+                                    </MenuItem>
+                                    <MenuItem value="warning">
+                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                            <WarningIcon fontSize="small" color="warning" />
+                                            <Typography>Warning</Typography>
+                                        </Box>
+                                    </MenuItem>
+                                    <MenuItem value="info">
+                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                            <InfoIcon fontSize="small" color="info" />
+                                            <Typography>Info</Typography>
+                                        </Box>
+                                    </MenuItem>
+                                </Select>
+                            </FormControl>
+                        </Grid>
+
+                        <Grid item xs={12} md={6}>
+                            <TextField
+                                label="Deadband"
+                                value={deadband}
+                                onChange={e => setDeadband(e.target.value)}
+                                fullWidth
+                                type="number"
+                                helperText="Hysteresis value to prevent chattering"
+                            />
+                        </Grid>
+
+                        <Grid item xs={12}>
+                            <TextField
+                                label="Custom Message"
+                                value={message}
+                                onChange={e => setMessage(e.target.value)}
+                                fullWidth
+                                multiline
+                                rows={2}
+                                helperText="Optional custom message for alarm notifications"
+                            />
+                        </Grid>
+
+                        <Grid item xs={12}>
+                            <FormControlLabel
+                                control={
+                                    <Switch
+                                        checked={enabled}
+                                        onChange={e => setEnabled(e.target.checked)}
+                                        color="primary"
+                                    />
+                                }
+                                label="Enable Alarm Rule"
+                            />
+                        </Grid>
+                    </Grid>
+                </DialogContent>
+                <DialogActions sx={{ p: 3, pt: 2 }}>
+                    <Button onClick={() => setAddOpen(false)} sx={{ borderRadius: 2 }}>
+                        Cancel
+                    </Button>
+                    <Button
+                        onClick={handleAdd}
+                        variant="contained"
+                        disabled={!ruleName.trim() || !tagId || !deviceId || !threshold || loading}
+                        sx={{
+                            borderRadius: 2,
+                            px: 3,
+                            background: 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)'
+                        }}
+                    >
+                        {loading ? 'Creating...' : 'Create Alarm Rule'}
+                    </Button>
+                </DialogActions>
+            </Dialog>
+
+            {/* Edit Dialog */}
             <Dialog
                 open={editOpen}
                 onClose={() => setEditOpen(false)}
@@ -1883,17 +2337,18 @@ export default function AlarmsPage() {
                     </Typography>
                 </DialogTitle>
                 <DialogContent>
-                    <Grid container spacing={2} sx={{ mt: 1 }}>
+                    <Grid container spacing={3} sx={{ mt: 1 }}>
                         <Grid item xs={12}>
                             <TextField
-                                label="Rule Name"
+                                label="Alarm Rule Name"
                                 value={ruleName}
                                 onChange={e => setRuleName(e.target.value)}
                                 fullWidth
                                 required
                             />
                         </Grid>
-                        <Grid item xs={12} md={4}>
+
+                        <Grid item xs={12} md={6}>
                             <FormControl fullWidth>
                                 <InputLabel>Condition Type</InputLabel>
                                 <Select
@@ -1901,54 +2356,64 @@ export default function AlarmsPage() {
                                     onChange={e => setConditionType(e.target.value)}
                                     label="Condition Type"
                                 >
-                                    <MenuItem value="high">High Limit</MenuItem>
-                                    <MenuItem value="low">Low Limit</MenuItem>
-                                    <MenuItem value="change">Change Detection</MenuItem>
+                                    <MenuItem value="high">High Alarm (Value > Threshold)</MenuItem>
+                                    <MenuItem value="low">Low Alarm (Value &lt; Threshold)</MenuItem>
+                                    <MenuItem value="change">Change Alarm (Deviation)</MenuItem>
                                 </Select>
                             </FormControl>
                         </Grid>
-                        <Grid item xs={12} md={4}>
+
+                        <Grid item xs={12} md={6}>
                             <TextField
-                                label="Threshold"
+                                label="Threshold Value"
                                 value={threshold}
                                 onChange={e => setThreshold(e.target.value)}
-                                type="number"
                                 fullWidth
                                 required
+                                type="number"
                             />
                         </Grid>
-                        <Grid item xs={12} md={4}>
+
+                        <Grid item xs={12} md={6}>
                             <FormControl fullWidth>
-                                <InputLabel>Severity</InputLabel>
+                                <InputLabel>Severity Level</InputLabel>
                                 <Select
                                     value={severity}
                                     onChange={e => setSeverity(e.target.value)}
-                                    label="Severity"
+                                    label="Severity Level"
                                 >
-                                    <MenuItem value="info">Info</MenuItem>
-                                    <MenuItem value="warning">Warning</MenuItem>
-                                    <MenuItem value="critical">Critical</MenuItem>
+                                    <MenuItem value="critical">
+                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                            <ErrorIcon fontSize="small" color="error" />
+                                            <Typography>Critical</Typography>
+                                        </Box>
+                                    </MenuItem>
+                                    <MenuItem value="warning">
+                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                            <WarningIcon fontSize="small" color="warning" />
+                                            <Typography>Warning</Typography>
+                                        </Box>
+                                    </MenuItem>
+                                    <MenuItem value="info">
+                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                            <InfoIcon fontSize="small" color="info" />
+                                            <Typography>Info</Typography>
+                                        </Box>
+                                    </MenuItem>
                                 </Select>
                             </FormControl>
                         </Grid>
+
                         <Grid item xs={12} md={6}>
                             <TextField
                                 label="Deadband"
                                 value={deadband}
                                 onChange={e => setDeadband(e.target.value)}
-                                type="number"
                                 fullWidth
+                                type="number"
                             />
                         </Grid>
-                        <Grid item xs={12} md={6}>
-                            <TextField
-                                label="Delay (seconds)"
-                                value={delaySeconds}
-                                onChange={e => setDelaySeconds(e.target.value)}
-                                type="number"
-                                fullWidth
-                            />
-                        </Grid>
+
                         <Grid item xs={12}>
                             <TextField
                                 label="Custom Message"
@@ -1959,6 +2424,7 @@ export default function AlarmsPage() {
                                 rows={2}
                             />
                         </Grid>
+
                         <Grid item xs={12}>
                             <FormControlLabel
                                 control={
@@ -1968,26 +2434,33 @@ export default function AlarmsPage() {
                                         color="primary"
                                     />
                                 }
-                                label="Enable this alarm rule"
+                                label="Enable Alarm Rule"
                             />
                         </Grid>
                     </Grid>
                 </DialogContent>
                 <DialogActions sx={{ p: 3 }}>
                     <Button onClick={() => setEditOpen(false)}>Cancel</Button>
-                    <Button onClick={handleEdit} variant="contained">Save Changes</Button>
+                    <Button onClick={handleEdit} variant="contained" disabled={loading}>
+                        {loading ? 'Updating...' : 'Save Changes'}
+                    </Button>
                 </DialogActions>
             </Dialog>
 
-            {/* Delete Confirmation Dialog */}
-            <Dialog open={deleteOpen} onClose={() => setDeleteOpen(false)} maxWidth="sm" PaperProps={{
-                sx: {
-                    borderRadius: 4,
-                    background: isDark
-                        ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
-                        : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
-                }
-            }}>
+            {/* Delete Dialog */}
+            <Dialog
+                open={deleteOpen}
+                onClose={() => setDeleteOpen(false)}
+                maxWidth="sm"
+                PaperProps={{
+                    sx: {
+                        borderRadius: 4,
+                        background: isDark
+                            ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                            : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                    }
+                }}
+            >
                 <DialogTitle>
                     <Typography variant="h5" sx={{ fontWeight: 700, color: 'error.main' }}>
                         Delete Alarm Rule
@@ -1998,24 +2471,31 @@ export default function AlarmsPage() {
                         Are you sure you want to delete the alarm rule <strong>{current?.rule_name}</strong>?
                     </Typography>
                     <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                        This will also clear any active alarms and remove all associated event history.
+                        This action cannot be undone. All associated alarm events will be permanently removed.
                     </Typography>
                 </DialogContent>
                 <DialogActions>
                     <Button onClick={() => setDeleteOpen(false)}>Cancel</Button>
-                    <Button onClick={handleDelete} color="error" variant="contained">Delete Rule</Button>
+                    <Button onClick={handleDelete} color="error" variant="contained" disabled={loading}>
+                        {loading ? 'Deleting...' : 'Delete Rule'}
+                    </Button>
                 </DialogActions>
             </Dialog>
 
-            {/* Acknowledge Alarm Dialog */}
-            <Dialog open={ackOpen} onClose={() => setAckOpen(false)} maxWidth="sm" PaperProps={{
-                sx: {
-                    borderRadius: 4,
-                    background: isDark
-                        ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
-                        : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
-                }
-            }}>
+            {/* Acknowledge Dialog */}
+            <Dialog
+                open={ackOpen}
+                onClose={() => setAckOpen(false)}
+                maxWidth="sm"
+                PaperProps={{
+                    sx: {
+                        borderRadius: 4,
+                        background: isDark
+                            ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)'
+                            : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)'
+                    }
+                }}
+            >
                 <DialogTitle>
                     <Typography variant="h5" sx={{ fontWeight: 700, color: 'warning.main' }}>
                         Acknowledge Alarm
@@ -2023,7 +2503,7 @@ export default function AlarmsPage() {
                 </DialogTitle>
                 <DialogContent>
                     <Typography sx={{ mb: 2 }}>
-                        Acknowledge alarm: <strong>{current?.rule_name}</strong>
+                        You are about to acknowledge the alarm: <strong>{current?.rule_name}</strong>
                     </Typography>
                     <TextField
                         label="Acknowledgment Message"
@@ -2032,28 +2512,43 @@ export default function AlarmsPage() {
                         fullWidth
                         multiline
                         rows={3}
-                        placeholder="Optional: Reason for acknowledgment or corrective action taken..."
-                        sx={{ mt: 2 }}
+                        placeholder="Enter acknowledgment message (optional)"
+                        helperText="Provide details about the acknowledgment for audit trail"
                     />
                 </DialogContent>
                 <DialogActions>
                     <Button onClick={() => setAckOpen(false)}>Cancel</Button>
-                    <Button onClick={handleAcknowledge} color="warning" variant="contained">
-                        Acknowledge Alarm
+                    <Button
+                        onClick={handleAcknowledge}
+                        variant="contained"
+                        disabled={loading}
+                        sx={{
+                            background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                            '&:hover': {
+                                background: 'linear-gradient(135deg, #059669 0%, #047857 100%)'
+                            }
+                        }}
+                    >
+                        {loading ? 'Acknowledging...' : 'Acknowledge Alarm'}
                     </Button>
                 </DialogActions>
             </Dialog>
 
-            {/* Snackbar */}
+            {/* Enhanced Snackbar */}
             <Snackbar
                 open={snackbar.open}
-                autoHideDuration={4000}
+                autoHideDuration={6000}
                 onClose={() => setSnackbar({ ...snackbar, open: false })}
                 anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
             >
                 <Alert
                     severity={snackbar.severity}
-                    sx={{ width: '100%', borderRadius: 3, fontWeight: 600 }}
+                    sx={{
+                        width: '100%',
+                        borderRadius: 3,
+                        fontWeight: 600,
+                        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.1)'
+                    }}
                     onClose={() => setSnackbar({ ...snackbar, open: false })}
                 >
                     {snackbar.msg}
@@ -2062,12 +2557,33 @@ export default function AlarmsPage() {
 
             {/* CSS animations */}
             <style>{`
-                @keyframes pulse {
-                    0% { opacity: 1; }
-                    50% { opacity: 0.5; }
-                    100% { opacity: 1; }
-                }
-            `}</style>
+    @keyframes pulse {
+        0% { 
+            opacity: 1; 
+            transform: scale(1);
+            box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.7);
+        }
+        50% { 
+            opacity: 0.8; 
+            transform: scale(1.02);
+            box-shadow: 0 0 0 10px rgba(220, 38, 38, 0);
+        }
+        100% { 
+            opacity: 1; 
+            transform: scale(1);
+            box-shadow: 0 0 0 0 rgba(220, 38, 38, 0);
+        }
+    }
+    
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(20px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    
+    .alarm-card-enter {
+        animation: fadeIn 0.3s ease-out;
+    }
+`}</style>
         </Box>
     );
 }

@@ -1,4 +1,4 @@
-// src/components/Sidebar.js - BEAUTIFUL RESTORED VERSION
+// src/components/Sidebar.js - FIXED VERSION WITH PROPER IMPORTS AND SCOPE
 import React from 'react';
 import {
     Box, List, ListItem, ListItemIcon, ListItemText, Typography, Paper, Avatar, Divider, Chip, Switch
@@ -10,6 +10,7 @@ import {
     History as HistoryIcon,
     Schema as SchemaIcon,
     ShowChart as ShowChartIcon,
+    Dashboard as DashboardIcon, // NEW: For OperatorView
     Logout as LogoutIcon,
     ArrowBack as ArrowBackIcon,
     LightMode as LightModeIcon,
@@ -80,42 +81,57 @@ export default function Sidebar() {
         navigate('/projects');
     };
 
+    // FIXED: Move menuItems inside component function where projectId is available
     const menuItems = [
         {
             text: 'Devices',
             icon: <DevicesIcon />,
             path: `/project/${projectId}/devices`,
-            description: 'Manage your devices'
+            description: 'Manage your devices',
+            color: 'primary'
         },
         {
             text: 'Tags',
             icon: <LabelIcon />,
             path: `/project/${projectId}/tags`,
-            description: 'Configure data points'
+            description: 'Configure data points',
+            color: 'secondary'
+        },
+        {
+            text: 'Operator View', // NEW: Add this menu item
+            icon: <DashboardIcon />,
+            path: `/project/${projectId}/operator`,
+            description: 'Real-time monitoring',
+            color: 'success',
+            isNew: true // Optional: show "NEW" badge
         },
         {
             text: 'Alarms',
             icon: <WarningIcon />,
             path: `/project/${projectId}/alarms`,
-            description: 'Monitor alerts'
+            description: 'Monitor alerts',
+            color: 'error'
         },
         {
             text: 'Measurements',
             icon: <ShowChartIcon />,
             path: `/project/${projectId}/measurements`,
-            description: 'View real-time data'
+            description: 'View real-time data',
+            color: 'info'
         },
         {
             text: 'Logs',
             icon: <HistoryIcon />,
             path: `/project/${projectId}/logs`,
-            description: 'System activity'
+            description: 'System activity',
+            color: 'default'
         },
         {
             text: 'HMI Editor',
             icon: <SchemaIcon />,
             path: `/project/${projectId}/diagram`,
-            description: 'Design interfaces'
+            description: 'Design interfaces',
+            color: 'warning'
         }
     ];
 
@@ -337,6 +353,7 @@ export default function Sidebar() {
                                             ? 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)'
                                             : 'transparent',
                                         color: isSelected ? 'white' : 'text.primary',
+                                        position: 'relative',
                                         '&:hover': {
                                             background: isSelected
                                                 ? 'linear-gradient(135deg, #1d4ed8 0%, #2563eb 100%)'
@@ -358,15 +375,32 @@ export default function Sidebar() {
                                     </ListItemIcon>
                                     <ListItemText
                                         primary={
-                                            <Typography
-                                                variant="body2"
-                                                sx={{
-                                                    fontWeight: isSelected ? 700 : 600,
-                                                    fontSize: '0.875rem'
-                                                }}
-                                            >
-                                                {item.text}
-                                            </Typography>
+                                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                <Typography
+                                                    variant="body2"
+                                                    sx={{
+                                                        fontWeight: isSelected ? 700 : 600,
+                                                        fontSize: '0.875rem'
+                                                    }}
+                                                >
+                                                    {item.text}
+                                                </Typography>
+                                                {/* NEW badge for Operator View */}
+                                                {item.isNew && !isSelected && (
+                                                    <Chip
+                                                        label="NEW"
+                                                        size="small"
+                                                        sx={{
+                                                            height: 16,
+                                                            fontSize: '0.6rem',
+                                                            fontWeight: 700,
+                                                            bgcolor: 'success.main',
+                                                            color: 'white',
+                                                            '& .MuiChip-label': { px: 1 }
+                                                        }}
+                                                    />
+                                                )}
+                                            </Box>
                                         }
                                         secondary={
                                             !isSelected && (
@@ -382,6 +416,17 @@ export default function Sidebar() {
                                             )
                                         }
                                     />
+
+                                    {/* Special indicator for Operator View */}
+                                    {item.text === 'Operator View' && (
+                                        <CircleIcon
+                                            sx={{
+                                                fontSize: 8,
+                                                color: isSelected ? 'white' : '#10b981',
+                                                animation: isSelected ? 'none' : 'pulse 2s infinite'
+                                            }}
+                                        />
+                                    )}
                                 </ListItem>
                             </motion.div>
                         );
@@ -464,7 +509,7 @@ export default function Sidebar() {
             </Box>
 
             {/* Add pulse animation for status indicator */}
-            <style jsx>{`
+            <style>{`
                 @keyframes pulse {
                     0%, 100% { opacity: 1; }
                     50% { opacity: 0.5; }

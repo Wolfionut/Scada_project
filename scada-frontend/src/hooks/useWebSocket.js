@@ -1,458 +1,698 @@
-// src/hooks/useWebSocket.js - Complete Fixed Version
+// src/hooks/useWebSocket.js - FIXED VERSION with Message Queue to Prevent Race Conditions
 import { useEffect, useRef, useState, useCallback } from 'react';
 
-export function useWebSocket(url) {
+// 🔧 Improved Token Manager
+class WebSocketTokenManager {
+    constructor() {
+        this.currentToken = null;
+    }
+
+    async getValidToken() {
+        try {
+            // Get token from localStorage or sessionStorage
+            const authToken = localStorage.getItem('token') || sessionStorage.getItem('token');
+            if (!authToken) {
+                console.error('❌ No authentication token found');
+                return null;
+            }
+
+            // Simple token validation (check if it's not expired)
+            try {
+                const payload = JSON.parse(atob(authToken.split('.')[1]));
+                if (payload.exp && payload.exp * 1000 < Date.now()) {
+                    console.error('❌ Token has expired');
+                    return null;
+                }
+            } catch (e) {
+                console.error('❌ Invalid token format');
+                return null;
+            }
+
+            this.currentToken = authToken;
+            return this.currentToken;
+
+        } catch (error) {
+            console.error('❌ Failed to get WebSocket token:', error);
+            return null;
+        }
+    }
+
+    invalidateToken() {
+        this.currentToken = null;
+    }
+}
+
+// 🔧 Core WebSocket Hook - FIXED WITH MESSAGE QUEUE
+export function useWebSocket(projectId) {
     const [isConnected, setIsConnected] = useState(false);
     const [lastMessage, setLastMessage] = useState(null);
     const [error, setError] = useState(null);
+    const [connectionAttempts, setConnectionAttempts] = useState(0);
+
+    // 🚀 NEW: Message Queue System to prevent race conditions
+    const messageQueue = useRef([]);
+    const [messageCount, setMessageCount] = useState(0);
+
     const ws = useRef(null);
     const reconnectAttempts = useRef(0);
-    const maxReconnectAttempts = 3;
+    const maxReconnectAttempts = 5;
+    const reconnectTimeoutRef = useRef(null);
+    const heartbeatIntervalRef = useRef(null);
+    const tokenManager = useRef(new WebSocketTokenManager());
+    const isIntentionalClose = useRef(false);
+    const lastConnectionAttempt = useRef(0);
+    const minReconnectDelay = 1000; // Minimum 1 second between attempts
 
-    const connect = useCallback(() => {
+    // 🔧 Get WebSocket URL with improved logic
+    const getWebSocketUrl = useCallback(() => {
+        if (process.env.NODE_ENV === 'production') {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            return `${protocol}//${window.location.host}`;
+        } else {
+            // Development - try to connect to the server
+            return 'ws://localhost:4000';
+        }
+    }, []);
+
+    // 🔧 Improved WebSocket Creation
+    const createWebSocket = useCallback(async (url, token) => {
+        console.log('🔌 Creating WebSocket connection to:', url);
+
+        // Construct WebSocket URL with token
+        const wsUrl = `${url}/ws?token=${encodeURIComponent(token)}`;
+        console.log('🔗 WebSocket URL:', wsUrl.replace(token, '***TOKEN***'));
+
+        const websocket = new WebSocket(wsUrl);
+
+        // Set binary type for better performance
+        websocket.binaryType = 'arraybuffer';
+
+        return websocket;
+    }, []);
+
+    // 🔧 Enhanced Connection Function
+    const connect = useCallback(async () => {
+        // Prevent too frequent connection attempts
+        const now = Date.now();
+        if (now - lastConnectionAttempt.current < minReconnectDelay) {
+            console.log('⏳ Preventing too frequent connection attempts');
+            return false;
+        }
+        lastConnectionAttempt.current = now;
+
         try {
-            const token = localStorage.getItem('token') || sessionStorage.getItem('token');
+            // Get authentication token
+            const token = await tokenManager.current.getValidToken();
             if (!token) {
-                setError('No authentication token found');
-                console.log('❌ WebSocket: No token found');
-                return;
+                setError('Authentication token not available - please log in again');
+                console.error('❌ WebSocket: No valid authentication token');
+                return false;
             }
 
-            const wsUrl = `${url}?token=${token}`;
-            console.log('🔌 Connecting to WebSocket:', url);
+            console.log('🔌 Attempting WebSocket connection...');
+            setConnectionAttempts(prev => prev + 1);
+            setError(null);
 
-            ws.current = new WebSocket(wsUrl);
+            // Get WebSocket URL
+            const wsUrl = getWebSocketUrl();
 
-            const connectionTimeout = setTimeout(() => {
-                if (ws.current && ws.current.readyState === WebSocket.CONNECTING) {
-                    console.log('⏰ WebSocket connection timeout');
-                    ws.current.close();
-                    setError('Connection timeout');
-                }
-            }, 5000);
+            // Create WebSocket connection
+            ws.current = await createWebSocket(wsUrl, token);
 
-            ws.current.onopen = () => {
-                console.log('✅ WebSocket connected');
-                clearTimeout(connectionTimeout);
+            // 🔧 Connection Event Handlers
+            ws.current.onopen = (event) => {
+                console.log('✅ WebSocket connected successfully');
+                console.log('🔗 Connection details:', {
+                    url: event.target.url.replace(/token=[^&]+/, 'token=***'),
+                    readyState: event.target.readyState,
+                    protocol: event.target.protocol
+                });
+
                 setIsConnected(true);
                 setError(null);
                 reconnectAttempts.current = 0;
+                setConnectionAttempts(0);
+
+                // Start heartbeat
+                startHeartbeat();
+
+                // Subscribe to project if provided
+                if (projectId) {
+                    setTimeout(() => {
+                        subscribeToProject(projectId);
+                    }, 1000);
+                }
             };
 
+            // 🚀 FIXED: Message handler with queue system
             ws.current.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
-                    console.log('📨 WebSocket message:', data.type, data.project_id);
-                    setLastMessage(data);
+
+                    // Handle heartbeat responses
+                    if (data.type === 'pong') {
+                        console.log('💓 Heartbeat response received', messageQueue.current.length);
+                        return;
+                    }
+
+                    console.log('📨 WebSocket message received:', {
+                        type: data.type,
+                        projectId: data.projectId,
+                        dataLength: data.data ? (Array.isArray(data.data) ? data.data.length : 'object') : 'none'
+                    });
+
+                    // 🚀 CRITICAL FIX: Add to message queue instead of overwriting lastMessage
+                    const messageWithId = {
+                        ...data,
+                        receivedAt: new Date().toISOString(),
+                        messageId: Date.now() + Math.random() // Unique ID
+                    };
+
+                    messageQueue.current.push(messageWithId);
+                    setMessageCount(prev => prev + 1); // Trigger processing
+
+                    // Also keep lastMessage for backward compatibility
+                    setLastMessage(messageWithId);
+
                 } catch (err) {
-                    console.error('Error parsing WebSocket message:', err);
+                    console.error('❌ Error parsing WebSocket message:', err);
+                    console.error('❌ Raw message:', event.data);
                 }
             };
 
             ws.current.onclose = (event) => {
-                clearTimeout(connectionTimeout);
-                console.log('📴 WebSocket disconnected:', event.code, event.reason);
+                clearInterval(heartbeatIntervalRef.current);
+
+                const closeReasons = {
+                    1000: 'Normal closure',
+                    1001: 'Going away',
+                    1002: 'Protocol error',
+                    1003: 'Unsupported data',
+                    1006: 'Connection lost',
+                    1008: 'Policy violation (likely auth failed)',
+                    1011: 'Server error',
+                    1015: 'TLS handshake failed'
+                };
+
+                console.log('📴 WebSocket disconnected:', {
+                    code: event.code,
+                    reason: event.reason || closeReasons[event.code] || 'Unknown',
+                    wasClean: event.wasClean,
+                    intentional: isIntentionalClose.current
+                });
+
                 setIsConnected(false);
 
-                if (event.code !== 1008 && reconnectAttempts.current < maxReconnectAttempts) {
-                    reconnectAttempts.current++;
-                    const delay = Math.pow(2, reconnectAttempts.current) * 1000;
-                    console.log(`🔄 Reconnecting in ${delay}ms (attempt ${reconnectAttempts.current})`);
+                // Handle different close codes
+                if (event.code === 1008) {
+                    console.error('❌ WebSocket: Authentication failed');
+                    setError('Authentication failed - please log in again');
+                    tokenManager.current.invalidateToken();
+                    return;
+                } else if (event.code === 1006) {
+                    console.warn('⚠️ WebSocket: Network connection lost');
+                    setError('Network connection lost');
+                } else if (event.code === 1002) {
+                    console.error('❌ WebSocket: Protocol error');
+                    setError('WebSocket protocol error');
+                } else if (event.code === 1011) {
+                    console.error('❌ WebSocket: Server error');
+                    setError('Server error occurred');
+                }
 
-                    setTimeout(() => {
-                        if (reconnectAttempts.current <= maxReconnectAttempts) {
-                            connect();
-                        }
-                    }, delay);
-                } else {
-                    if (event.code === 1008) {
-                        setError('Authentication failed');
-                        console.log('❌ WebSocket: Authentication failed');
-                    } else {
-                        setError('Connection failed');
-                        console.log('❌ WebSocket: Max reconnection attempts reached');
-                    }
+                // Attempt reconnection if not intentional
+                if (!isIntentionalClose.current && reconnectAttempts.current < maxReconnectAttempts) {
+                    scheduleReconnect();
+                } else if (reconnectAttempts.current >= maxReconnectAttempts) {
+                    setError('Connection failed after multiple attempts - please refresh the page');
+                    console.error('❌ WebSocket: Max reconnection attempts reached');
                 }
             };
 
             ws.current.onerror = (error) => {
-                clearTimeout(connectionTimeout);
                 console.error('❌ WebSocket error:', error);
+
+                // Try to provide more specific error information
+                if (!navigator.onLine) {
+                    setError('No internet connection');
+                } else {
+                    setError('WebSocket connection failed - server may be down');
+                }
             };
 
-        } catch (err) {
-            setError('Failed to create WebSocket connection');
-            console.error('WebSocket creation error:', err);
-        }
-    }, [url]);
+            return true;
 
+        } catch (err) {
+            console.error('❌ Failed to create WebSocket connection:', err);
+            setError(`Connection failed: ${err.message}`);
+
+            // Try fallback for development
+            if (process.env.NODE_ENV === 'development' && !err.message.includes('4001')) {
+                console.log('🔄 Trying fallback WebSocket port 4001...');
+                try {
+                    const fallbackUrl = 'ws://localhost:4001';
+                    const token = await tokenManager.current.getValidToken();
+                    if (token) {
+                        ws.current = await createWebSocket(fallbackUrl, token);
+                        return true;
+                    }
+                } catch (fallbackErr) {
+                    console.error('❌ Fallback connection also failed:', fallbackErr);
+                }
+            }
+
+            scheduleReconnect();
+            return false;
+        }
+    }, [projectId, getWebSocketUrl, createWebSocket]);
+
+    // 🔧 Improved Reconnection Logic
+    const scheduleReconnect = useCallback(() => {
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+        }
+
+        reconnectAttempts.current++;
+
+        // Exponential backoff with jitter
+        const baseDelay = Math.min(1000 * Math.pow(2, reconnectAttempts.current - 1), 10000);
+        const jitter = Math.random() * 1000; // Add up to 1 second of jitter
+        const delay = baseDelay + jitter;
+
+        console.log(`🔄 Scheduling reconnection attempt ${reconnectAttempts.current}/${maxReconnectAttempts} in ${Math.round(delay)}ms`);
+
+        reconnectTimeoutRef.current = setTimeout(() => {
+            if (reconnectAttempts.current <= maxReconnectAttempts && !isIntentionalClose.current) {
+                connect();
+            }
+        }, delay);
+    }, [connect]);
+
+    // 🔧 Improved Heartbeat System
+    const startHeartbeat = useCallback(() => {
+        if (heartbeatIntervalRef.current) {
+            clearInterval(heartbeatIntervalRef.current);
+        }
+
+        heartbeatIntervalRef.current = setInterval(() => {
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                try {
+                    ws.current.send(JSON.stringify({
+                        type: 'ping',
+                        timestamp: Date.now(),
+                        projectId: projectId ? parseInt(projectId) : null
+                    }));
+                } catch (err) {
+                    console.error('❌ Failed to send heartbeat:', err);
+                }
+            }
+        }, 30000); // 30 seconds
+    }, [projectId]);
+
+    // 🔧 Enhanced Send Message Function
     const sendMessage = useCallback((message) => {
-        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-            ws.current.send(JSON.stringify(message));
+        if (!ws.current) {
+            console.warn('⚠️ WebSocket not initialized');
+            return false;
+        }
+
+        if (ws.current.readyState !== WebSocket.OPEN) {
+            console.warn('⚠️ WebSocket not connected, readyState:', ws.current.readyState);
+            setError('WebSocket not connected');
+            return false;
+        }
+
+        try {
+            const messageWithTimestamp = {
+                ...message,
+                timestamp: Date.now()
+            };
+
+            ws.current.send(JSON.stringify(messageWithTimestamp));
             console.log('📤 Sent WebSocket message:', message.type);
-        } else {
-            console.warn('WebSocket not connected, cannot send message');
+            return true;
+
+        } catch (err) {
+            console.error('❌ Failed to send WebSocket message:', err);
+            setError('Failed to send message');
+            return false;
         }
     }, []);
 
-    const subscribe = useCallback((subscription) => {
-        sendMessage({
+    // 🔧 Project Subscription Functions
+    const subscribeToProject = useCallback((projectId) => {
+        const success = sendMessage({
             type: 'subscribe_project',
-            projectId: subscription.projectId
+            projectId: parseInt(projectId)
         });
+
+        if (success) {
+            console.log(`📡 Subscribed to project ${projectId}`);
+        } else {
+            console.error(`❌ Failed to subscribe to project ${projectId}`);
+        }
+
+        return success;
     }, [sendMessage]);
 
-    const unsubscribe = useCallback((subscription) => {
-        sendMessage({
+    const unsubscribeFromProject = useCallback((projectId) => {
+        const success = sendMessage({
             type: 'unsubscribe_project',
-            projectId: subscription.projectId
+            projectId: parseInt(projectId)
         });
+
+        if (success) {
+            console.log(`📡 Unsubscribed from project ${projectId}`);
+        }
+
+        return success;
     }, [sendMessage]);
 
-    // Alarm-specific methods
-    const acknowledgeAlarm = useCallback((projectId, ruleId, message) => {
-        sendMessage({
+    // 🔧 Alarm Functions
+    const acknowledgeAlarm = useCallback((projectId, ruleId, message = 'Acknowledged via WebSocket') => {
+        return sendMessage({
             type: 'acknowledge_alarm',
-            projectId,
-            ruleId,
-            message
+            projectId: parseInt(projectId),
+            ruleId: parseInt(ruleId),
+            message: message
         });
     }, [sendMessage]);
 
     const getActiveAlarms = useCallback((projectId) => {
-        sendMessage({
+        return sendMessage({
             type: 'get_active_alarms',
-            projectId
+            projectId: parseInt(projectId)
         });
     }, [sendMessage]);
 
+    // 🔧 Connection Management
+    const forceReconnect = useCallback(() => {
+        console.log('🔄 Force reconnecting WebSocket...');
+        isIntentionalClose.current = false;
+        reconnectAttempts.current = 0;
+        setError(null);
+
+        if (ws.current) {
+            isIntentionalClose.current = true;
+            ws.current.close(1000, 'Force reconnect');
+        }
+
+        setTimeout(() => {
+            isIntentionalClose.current = false;
+            connect();
+        }, 1000);
+    }, [connect]);
+
+    const disconnect = useCallback(() => {
+        console.log('🔌 Disconnecting WebSocket...');
+        isIntentionalClose.current = true;
+
+        // Clear all timeouts and intervals
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+        }
+        if (heartbeatIntervalRef.current) {
+            clearInterval(heartbeatIntervalRef.current);
+        }
+
+        if (ws.current) {
+            ws.current.close(1000, 'Intentional disconnect');
+        }
+
+        setIsConnected(false);
+        setError(null);
+    }, []);
+
+    // 🔧 Initialize Connection
     useEffect(() => {
+        isIntentionalClose.current = false;
         connect();
 
         return () => {
+            console.log('🧹 Cleaning up WebSocket connection...');
+            isIntentionalClose.current = true;
+
+            // Clean up all timeouts and intervals
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
+            }
+            if (heartbeatIntervalRef.current) {
+                clearInterval(heartbeatIntervalRef.current);
+            }
+
             if (ws.current) {
-                ws.current.close();
+                ws.current.close(1000, 'Component unmounted');
             }
         };
     }, [connect]);
-
-    // Send ping every 30 seconds
-    useEffect(() => {
-        if (isConnected) {
-            const pingInterval = setInterval(() => {
-                sendMessage({ type: 'ping' });
-            }, 30000);
-
-            return () => clearInterval(pingInterval);
-        }
-    }, [isConnected, sendMessage]);
 
     return {
         isConnected,
         lastMessage,
         error,
+        connectionAttempts,
         sendMessage,
-        subscribe,
-        unsubscribe,
+        subscribeToProject,
+        unsubscribeFromProject,
         acknowledgeAlarm,
-        getActiveAlarms
+        getActiveAlarms,
+        forceReconnect,
+        disconnect,
+        reconnectAttempts: reconnectAttempts.current,
+        maxReconnectAttempts,
+        // 🚀 NEW: Expose message queue for advanced usage
+        messageQueue: messageQueue.current,
+        messageCount,
+        // Additional debugging info
+        wsReadyState: ws.current?.readyState,
+        wsUrl: ws.current?.url
     };
 }
 
-// Global WebSocket connection
-export function useGlobalWebSocket() {
-    const wsUrl = process.env.NODE_ENV === 'production'
-        ? 'wss://your-production-domain.com'
-        : 'ws://localhost:4000';
-
-    return useWebSocket(wsUrl);
-}
-
-// Enhanced real-time data hook with comprehensive alarm support
+// 🔧 Enhanced Real-Time Data Hook - FIXED WITH MESSAGE QUEUE PROCESSING
 export function useRealTimeData(projectId) {
+    // Real-time data state
     const [measurements, setMeasurements] = useState({});
     const [deviceStatuses, setDeviceStatuses] = useState({});
-
-    // Comprehensive alarm state management
     const [activeAlarms, setActiveAlarms] = useState([]);
     const [alarmSummary, setAlarmSummary] = useState({
         total_active: 0,
         unacknowledged: 0,
+        acknowledged: 0,
         critical: 0,
         warning: 0,
         info: 0,
-        latest_trigger: null
+        latest_trigger: null,
+        has_active_alarms: false,
+        has_unacknowledged: false
     });
     const [alarmEvents, setAlarmEvents] = useState([]);
-    const [alarmRuleChanges, setAlarmRuleChanges] = useState(null);
 
+    // WebSocket connection with message queue
     const {
         isConnected,
         lastMessage,
         error,
-        subscribe,
-        unsubscribe,
+        connectionAttempts,
+        subscribeToProject,
+        unsubscribeFromProject,
         acknowledgeAlarm: wsAcknowledgeAlarm,
-        getActiveAlarms: wsGetActiveAlarms
-    } = useGlobalWebSocket();
+        getActiveAlarms: wsGetActiveAlarms,
+        forceReconnect,
+        sendMessage,
+        messageQueue,
+        messageCount
+    } = useWebSocket(projectId);
 
+    // 🚀 FIXED: Process all queued messages to prevent race conditions
     useEffect(() => {
-        if (isConnected && projectId) {
-            console.log(`📡 Subscribing to project ${projectId} for real-time data`);
-            subscribe({ projectId });
+        if (messageQueue.length === 0) return;
 
-            // Request current active alarms
-            wsGetActiveAlarms(projectId);
+        // Process all queued messages
+        const messagesToProcess = [...messageQueue];
+        messageQueue.length = 0;  // Clear queue
 
-            return () => {
-                console.log(`📡 Unsubscribing from project ${projectId}`);
-                unsubscribe({ projectId });
-            };
-        }
-    }, [isConnected, projectId, subscribe, unsubscribe, wsGetActiveAlarms]);
+        messagesToProcess.forEach(message => {
+            const { type, data, projectId: msgProjectId } = message;
 
-    useEffect(() => {
-        if (lastMessage) {
-            switch (lastMessage.type) {
+            // Only process messages for our project
+            if (msgProjectId && parseInt(msgProjectId) !== parseInt(projectId)) {
+                return;
+            }
+
+            console.log(`🔧 Processing real-time message: ${type}`, {
+                dataType: typeof data,
+                dataLength: Array.isArray(data) ? data.length : 'not array',
+                projectId: msgProjectId
+            });
+
+            switch (type) {
                 case 'measurement':
-                    if (lastMessage.data && lastMessage.data.tag_id) {
+                    if (data && data.tag_id !== undefined) {
                         setMeasurements(prev => ({
                             ...prev,
-                            [lastMessage.data.tag_id]: {
-                                value: lastMessage.data.value,
-                                timestamp: lastMessage.data.timestamp,
-                                tag_name: lastMessage.data.tag_name,
-                                device_name: lastMessage.data.device_name,
-                                device_id: lastMessage.data.device_id
+                            [data.tag_id]: {
+                                value: data.value,
+                                timestamp: data.timestamp,
+                                tag_name: data.tag_name,
+                                device_name: data.device_name,
+                                device_id: data.device_id,
+                                quality: data.quality || 'good',
+                                engineering_unit: data.engineering_unit
                             }
                         }));
-                        console.log(`📊 New measurement for tag ${lastMessage.data.tag_id}:`, lastMessage.data.value);
                     }
                     break;
 
                 case 'current_data':
-                    if (lastMessage.data && Array.isArray(lastMessage.data)) {
+                    if (data && Array.isArray(data)) {
+                        console.log(`📊 Processing ${data.length} current measurements`);
                         const newMeasurements = {};
-                        lastMessage.data.forEach(item => {
-                            if (item.tag_id) {
+                        data.forEach(item => {
+                            if (item.tag_id !== undefined) {
                                 newMeasurements[item.tag_id] = {
                                     value: item.value,
                                     timestamp: item.timestamp,
                                     tag_name: item.tag_name,
                                     device_name: item.device_name,
-                                    device_id: item.device_id
+                                    device_id: item.device_id,
+                                    quality: item.quality || 'good',
+                                    engineering_unit: item.engineering_unit
                                 };
                             }
                         });
-                        setMeasurements(newMeasurements);
-                        console.log('📊 Updated current data:', Object.keys(newMeasurements).length, 'measurements');
+                        setMeasurements(prev => ({ ...prev, ...newMeasurements }));
                     }
                     break;
 
                 case 'device_status':
-                    if (lastMessage.data && lastMessage.data.device_id) {
+                    if (data && data.device_id !== undefined) {
                         setDeviceStatuses(prev => ({
                             ...prev,
-                            [lastMessage.data.device_id]: {
-                                status: lastMessage.data.status,
-                                running: lastMessage.data.running,
-                                timestamp: lastMessage.data.timestamp,
-                                device_name: lastMessage.data.device_name
+                            [data.device_id]: {
+                                status: data.status,
+                                running: data.status === 'running',
+                                timestamp: data.timestamp,
+                                device_name: data.device_name
                             }
                         }));
-                        console.log(`🔌 Device status update for ${lastMessage.data.device_id}:`, lastMessage.data.status);
                     }
                     break;
 
-                case 'project_status':
-                    if (lastMessage.data) {
-                        // Update device statuses from project status
-                        if (lastMessage.data.devices && Array.isArray(lastMessage.data.devices)) {
-                            const newDeviceStatuses = {};
-                            lastMessage.data.devices.forEach(device => {
-                                if (device.device_id) {
-                                    newDeviceStatuses[device.device_id] = {
-                                        status: device.data_collection_active ? 'running' : 'stopped',
-                                        running: device.data_collection_active,
-                                        timestamp: new Date().toISOString(),
-                                        device_name: device.device_name
-                                    };
-                                }
-                            });
-                            setDeviceStatuses(prev => ({ ...prev, ...newDeviceStatuses }));
-                            console.log('📊 Project status update:', Object.keys(newDeviceStatuses).length, 'devices');
-                        }
-
-                        // Update measurements from recent data
-                        if (lastMessage.data.recent_measurements && Array.isArray(lastMessage.data.recent_measurements)) {
-                            const newMeasurements = {};
-                            lastMessage.data.recent_measurements.forEach(measurement => {
-                                if (measurement.tag_id) {
-                                    newMeasurements[measurement.tag_id] = {
-                                        value: measurement.value,
-                                        timestamp: measurement.timestamp,
-                                        tag_name: measurement.tag_name,
-                                        device_name: measurement.device_name
-                                    };
-                                }
-                            });
-                            setMeasurements(prev => ({ ...prev, ...newMeasurements }));
-                        }
-                    }
-                    break;
-
-                // 🔧 FIXED ALARM HANDLERS - Match your backend data structure exactly
                 case 'alarm_triggered':
-                    if (lastMessage.data) {
-                        console.log('🚨 ALARM TRIGGERED:', lastMessage.data.rule_name);
+                    if (data) {
+                        console.log('🚨 Alarm triggered:', data);
+                        const newAlarm = {
+                            id: data.rule_id || data.id,
+                            rule_id: data.rule_id || data.id,
+                            rule_name: data.rule_name,
+                            tag_id: data.tag_id,
+                            tag_name: data.tag_name,
+                            device_id: data.device_id,
+                            device_name: data.device_name,
+                            severity: data.severity || 'warning',
+                            threshold: data.threshold,
+                            trigger_value: data.value || data.trigger_value,
+                            condition_type: data.condition_type,
+                            message: data.message,
+                            state: 'triggered',
+                            triggered_at: data.triggered_at || new Date().toISOString(),
+                            acknowledged_at: null,
+                            acknowledged_by: null
+                        };
 
-                        // Add to alarm events with correct data structure
-                        setAlarmEvents(prev => [{
-                            type: 'triggered',
-                            timestamp: new Date().toISOString(),
-                            rule_name: lastMessage.data.rule_name,    // ✅ Fixed: Direct access
-                            tag_name: lastMessage.data.tag_name,      // ✅ Fixed: Direct access
-                            value: lastMessage.data.value,            // ✅ Fixed: Direct access
-                            threshold: lastMessage.data.threshold,    // ✅ Fixed: Direct access
-                            severity: lastMessage.data.severity,      // ✅ Fixed: Direct access
-                            message: lastMessage.data.message         // ✅ Fixed: Direct access
-                        }, ...prev.slice(0, 99)]);
-
-                        // Show browser notification if supported
-                        if ('Notification' in window && Notification.permission === 'granted') {
-                            new Notification('🚨 SCADA Alarm Triggered', {
-                                body: `${lastMessage.data.rule_name}: ${lastMessage.data.message}`,
-                                icon: '/alarm-icon.png',
-                                tag: `alarm-${lastMessage.data.rule_name}`
-                            });
-                        }
+                        setActiveAlarms(prev => {
+                            const filtered = prev.filter(a => a.rule_id !== newAlarm.rule_id);
+                            return [newAlarm, ...filtered];
+                        });
                     }
                     break;
 
                 case 'alarm_acknowledged':
-                    if (lastMessage.data) {
-                        console.log('✅ ALARM ACKNOWLEDGED:', lastMessage.data.rule_name);
-
-                        setAlarmEvents(prev => [{
-                            type: 'acknowledged',
-                            timestamp: new Date().toISOString(),
-                            rule_name: lastMessage.data.rule_name,
-                            acknowledged_by: lastMessage.data.acknowledged_by,
-                            ack_message: lastMessage.data.ack_message
-                        }, ...prev.slice(0, 99)]);
+                    if (data) {
+                        console.log('✅ Alarm acknowledged:', data);
+                        const ruleId = data.rule_id || data.id;
+                        setActiveAlarms(prev => prev.filter(alarm => alarm.rule_id !== ruleId));
                     }
                     break;
 
                 case 'alarm_cleared':
-                    if (lastMessage.data) {
-                        console.log('🟢 ALARM CLEARED:', lastMessage.data.rule_name);
-
-                        setAlarmEvents(prev => [{
-                            type: 'cleared',
-                            timestamp: new Date().toISOString(),
-                            rule_name: lastMessage.data.rule_name,    // ✅ Fixed: Direct access
-                            tag_name: lastMessage.data.tag_name,      // ✅ Fixed: Direct access
-                            value: lastMessage.data.value,            // ✅ Fixed: Direct access
-                            threshold: lastMessage.data.threshold     // ✅ Fixed: Direct access
-                        }, ...prev.slice(0, 99)]);
+                    if (data) {
+                        console.log('🟢 Alarm cleared:', data);
+                        const ruleId = data.rule_id || data.id;
+                        setActiveAlarms(prev => prev.filter(alarm => alarm.rule_id !== ruleId));
                     }
                     break;
 
                 case 'active_alarms':
-                    if (lastMessage.data && Array.isArray(lastMessage.data)) {
-                        console.log('📋 Active alarms update:', lastMessage.data.length, 'alarms');
-                        setActiveAlarms(lastMessage.data);
+                    console.log(`📥 Received ${Array.isArray(data) ? data.length : 'invalid'} active alarms`);
+                    if (Array.isArray(data)) {
+                        const processedAlarms = data.map(alarm => ({
+                            id: alarm.rule_id || alarm.id,
+                            rule_id: alarm.rule_id || alarm.id,
+                            rule_name: alarm.rule_name,
+                            tag_id: alarm.tag_id,
+                            tag_name: alarm.tag_name,
+                            device_id: alarm.device_id,
+                            device_name: alarm.device_name,
+                            severity: alarm.severity || 'warning',
+                            threshold: alarm.threshold,
+                            trigger_value: alarm.trigger_value || alarm.value,
+                            condition_type: alarm.condition_type,
+                            message: alarm.message,
+                            state: alarm.state || 'triggered',
+                            triggered_at: alarm.triggered_at,
+                            acknowledged_at: alarm.acknowledged_at,
+                            acknowledged_by: alarm.acknowledged_by
+                        }));
+
+                        setActiveAlarms(processedAlarms);
                     }
                     break;
 
                 case 'alarm_summary':
-                    if (lastMessage.data) {
-                        console.log('📊 Alarm summary update:', lastMessage.data);
-                        setAlarmSummary(lastMessage.data);
-                    }
-                    break;
+                    if (data) {
+                        console.log('📊 Processing alarm summary:', data);
+                        const parsedSummary = {
+                            total_active: parseInt(data.total_active) || 0,
+                            unacknowledged: parseInt(data.unacknowledged) || 0,
+                            acknowledged: parseInt(data.acknowledged) || 0,
+                            critical: parseInt(data.critical) || 0,
+                            warning: parseInt(data.warning) || 0,
+                            info: parseInt(data.info) || 0,
+                            latest_trigger: data.latest_trigger,
+                            has_active_alarms: (parseInt(data.total_active) || 0) > 0,
+                            has_unacknowledged: (parseInt(data.unacknowledged) || 0) > 0
+                        };
 
-                case 'alarm_rule_created':
-                    if (lastMessage.data) {
-                        console.log('➕ Alarm rule created:', lastMessage.data.rule?.rule_name);
-                        setAlarmRuleChanges({
-                            type: 'created',
-                            rule: lastMessage.data.rule,
-                            timestamp: new Date().toISOString()
-                        });
-                    }
-                    break;
-
-                case 'alarm_rule_updated':
-                    if (lastMessage.data) {
-                        console.log('📝 Alarm rule updated:', lastMessage.data.rule?.rule_name);
-                        setAlarmRuleChanges({
-                            type: 'updated',
-                            rule: lastMessage.data.rule,
-                            timestamp: new Date().toISOString()
-                        });
-                    }
-                    break;
-
-                case 'alarm_rule_deleted':
-                    if (lastMessage.data) {
-                        console.log('🗑️ Alarm rule deleted:', lastMessage.data.rule_name);
-                        setAlarmRuleChanges({
-                            type: 'deleted',
-                            rule_name: lastMessage.data.rule_name,
-                            rule_id: lastMessage.data.rule_id,
-                            timestamp: new Date().toISOString()
-                        });
-                    }
-                    break;
-
-                case 'alarm_ack_response':
-                    if (lastMessage.success) {
-                        console.log('✅ Alarm acknowledgment successful:', lastMessage.message);
-                    } else {
-                        console.error('❌ Alarm acknowledgment failed:', lastMessage.error);
-                    }
-                    break;
-
-                case 'alarm_ack_error':
-                    console.error('❌ Alarm acknowledgment error:', lastMessage.error);
-                    break;
-
-                // Legacy alarm support
-                case 'alarm':
-                    if (lastMessage.data) {
-                        setActiveAlarms(prev => [lastMessage.data, ...prev.slice(0, 99)]);
-                        console.log('🚨 Legacy alarm:', lastMessage.data);
+                        setAlarmSummary(parsedSummary);
+                        console.log('✅ Alarm summary updated:', parsedSummary);
                     }
                     break;
 
                 case 'connected':
-                    console.log('✅ Connected to WebSocket:', lastMessage.message);
+                    console.log('✅ WebSocket server confirmed connection');
                     break;
 
                 case 'subscribed':
-                    console.log('✅ Subscribed to project:', lastMessage.projectId);
-                    break;
-
-                case 'unsubscribed':
-                    console.log('📴 Unsubscribed from project:', lastMessage.projectId);
-                    break;
-
-                case 'pong':
-                    // Ping response - connection is alive
+                    console.log('✅ Successfully subscribed to project:', msgProjectId);
+                    // Request active alarms after subscription
+                    setTimeout(() => {
+                        wsGetActiveAlarms(projectId);
+                    }, 500);
                     break;
 
                 case 'error':
-                    console.error('❌ WebSocket error from server:', lastMessage.message);
+                    console.error('❌ Server error:', message.message);
                     break;
 
                 default:
-                    console.log('📨 Unknown WebSocket message type:', lastMessage.type);
+                    console.log('📨 Unknown message type:', type, data);
             }
-        }
-    }, [lastMessage, projectId]);
+        });
+    }, [messageCount, projectId, wsGetActiveAlarms]); // 🚀 CRITICAL: Trigger on messageCount change
 
-    // Helper functions
+    // 🔧 Helper Functions
     const getTagValue = useCallback((tagId) => {
         return measurements[tagId]?.value;
     }, [measurements]);
@@ -461,140 +701,303 @@ export function useRealTimeData(projectId) {
         return measurements[tagId]?.timestamp;
     }, [measurements]);
 
+    const getTagDataByName = useCallback((tagName) => {
+        return Object.values(measurements).find(m => m.tag_name === tagName);
+    }, [measurements]);
+
     const getDeviceStatus = useCallback((deviceId) => {
         return deviceStatuses[deviceId];
     }, [deviceStatuses]);
 
-    const getRecentMeasurements = useCallback((maxAge = 300000) => {
-        const now = Date.now();
-        return Object.entries(measurements).filter(([tagId, measurement]) => {
-            if (!measurement.timestamp) return false;
-            const age = now - new Date(measurement.timestamp).getTime();
-            return age <= maxAge;
-        });
-    }, [measurements]);
-
-    const getActiveDevices = useCallback(() => {
-        return Object.entries(deviceStatuses).filter(([deviceId, status]) => {
-            return status.running || status.status === 'running';
-        });
-    }, [deviceStatuses]);
-
-    // Alarm-specific helper functions
-    const acknowledgeAlarm = useCallback((ruleId, message = 'Acknowledged via WebSocket') => {
+    const acknowledgeAlarm = useCallback((ruleId, message = 'Acknowledged via SCADA Interface') => {
         if (projectId) {
-            wsAcknowledgeAlarm(projectId, ruleId, message);
+            return wsAcknowledgeAlarm(projectId, ruleId, message);
         }
+        return false;
     }, [projectId, wsAcknowledgeAlarm]);
-
-    const getAlarmsByTag = useCallback((tagId) => {
-        return activeAlarms.filter(alarm => alarm.tag_id === tagId);
-    }, [activeAlarms]);
-
-    const getAlarmsBySeverity = useCallback((severity) => {
-        return activeAlarms.filter(alarm => alarm.severity === severity);
-    }, [activeAlarms]);
-
-    const getUnacknowledgedAlarms = useCallback(() => {
-        return activeAlarms.filter(alarm => !alarm.acknowledged_at);
-    }, [activeAlarms]);
-
-    const hasActiveAlarms = useCallback(() => {
-        return activeAlarms.length > 0;
-    }, [activeAlarms]);
-
-    const hasCriticalAlarms = useCallback(() => {
-        return activeAlarms.some(alarm => alarm.severity === 'critical');
-    }, [activeAlarms]);
-
-    // Request browser notification permission
-    useEffect(() => {
-        if ('Notification' in window && Notification.permission === 'default') {
-            Notification.requestPermission().then(permission => {
-                console.log('Notification permission:', permission);
-            });
-        }
-    }, []);
 
     return {
         // Connection status
         isConnected,
         error,
+        connectionAttempts,
 
         // Real-time data
         measurements,
         deviceStatuses,
-
-        // Comprehensive alarm data
         activeAlarms,
         alarmSummary,
         alarmEvents,
-        alarmRuleChanges,
 
         // Helper functions
         getTagValue,
         getTagTimestamp,
+        getTagDataByName,
         getDeviceStatus,
-        getRecentMeasurements,
-        getActiveDevices,
-
-        // Alarm helper functions
         acknowledgeAlarm,
-        getAlarmsByTag,
-        getAlarmsBySeverity,
-        getUnacknowledgedAlarms,
-        hasActiveAlarms,
-        hasCriticalAlarms,
 
         // Statistics
         measurementCount: Object.keys(measurements).length,
         deviceCount: Object.keys(deviceStatuses).length,
         alarmCount: activeAlarms.length,
-        unacknowledgedAlarmCount: alarmSummary.unacknowledged,
-        criticalAlarmCount: alarmSummary.critical,
 
-        // Debug info
-        lastMessageType: lastMessage?.type,
-        lastMessageTime: lastMessage?.timestamp
+        // Connection management
+        forceReconnect
     };
 }
 
-// Hook for WebSocket connection health monitoring
-export function useWebSocketHealth() {
-    const { isConnected, error } = useGlobalWebSocket();
-    const [connectionHistory, setConnectionHistory] = useState([]);
-    const [disconnectionCount, setDisconnectionCount] = useState(0);
+// 🔧 Global WebSocket Hook (for backward compatibility with ProjectsPage)
+export function useGlobalWebSocket() {
+    const [isConnected, setIsConnected] = useState(false);
+    const [lastMessage, setLastMessage] = useState(null);
+    const [error, setError] = useState(null);
+    const [connectionAttempts, setConnectionAttempts] = useState(0);
 
-    useEffect(() => {
-        const timestamp = new Date().toISOString();
+    const ws = useRef(null);
+    const reconnectAttempts = useRef(0);
+    const maxReconnectAttempts = 5;
+    const reconnectTimeoutRef = useRef(null);
+    const heartbeatIntervalRef = useRef(null);
+    const tokenManager = useRef(new WebSocketTokenManager());
+    const isIntentionalClose = useRef(false);
 
-        if (isConnected) {
-            setConnectionHistory(prev => [...prev.slice(-9), {
-                status: 'connected',
-                timestamp,
-                error: null
-            }]);
-        } else if (error) {
-            setConnectionHistory(prev => [...prev.slice(-9), {
-                status: 'disconnected',
-                timestamp,
-                error
-            }]);
-            setDisconnectionCount(prev => prev + 1);
+    // 🔧 Get WebSocket URL based on environment
+    const getWebSocketUrl = useCallback(() => {
+        if (process.env.NODE_ENV === 'production') {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            return `${protocol}//${window.location.host}`;
+        } else {
+            return 'ws://localhost:4000';
         }
-    }, [isConnected, error]);
+    }, []);
+
+    // 🔧 Create WebSocket Connection
+    const createWebSocket = useCallback(async (url, token) => {
+        console.log('🔌 Creating Global WebSocket connection to:', url);
+        const wsUrl = `${url}/ws?token=${encodeURIComponent(token)}`;
+        return new WebSocket(wsUrl);
+    }, []);
+
+    // 🔧 Connection Function
+    const connect = useCallback(async () => {
+        try {
+            const token = await tokenManager.current.getValidToken();
+            if (!token) {
+                setError('Authentication token not available');
+                return false;
+            }
+
+            setConnectionAttempts(prev => prev + 1);
+            let wsUrl = getWebSocketUrl();
+            ws.current = await createWebSocket(wsUrl, token);
+
+            ws.current.onopen = () => {
+                console.log('✅ Global WebSocket connected');
+                setIsConnected(true);
+                setError(null);
+                reconnectAttempts.current = 0;
+                setConnectionAttempts(0);
+                startHeartbeat();
+            };
+
+            ws.current.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type !== 'pong') {
+                        setLastMessage({ ...data, receivedAt: new Date().toISOString() });
+                    }
+                } catch (err) {
+                    console.error('❌ Error parsing message:', err);
+                }
+            };
+
+            ws.current.onclose = (event) => {
+                clearInterval(heartbeatIntervalRef.current);
+                setIsConnected(false);
+
+                if (event.code === 1008) {
+                    setError('Authentication failed');
+                    tokenManager.current.invalidateToken();
+                    return;
+                }
+
+                if (!isIntentionalClose.current && reconnectAttempts.current < maxReconnectAttempts) {
+                    scheduleReconnect();
+                }
+            };
+
+            ws.current.onerror = (error) => {
+                console.error('❌ Global WebSocket error:', error);
+                setError('WebSocket connection error');
+            };
+
+            return true;
+        } catch (err) {
+            console.error('❌ Failed to create Global WebSocket:', err);
+            setError(`Connection failed: ${err.message}`);
+
+            if (process.env.NODE_ENV !== 'production') {
+                try {
+                    const fallbackUrl = 'ws://localhost:4001';
+                    ws.current = await createWebSocket(fallbackUrl, await tokenManager.current.getValidToken());
+                    return true;
+                } catch (fallbackErr) {
+                    console.error('❌ Fallback connection failed:', fallbackErr);
+                }
+            }
+
+            scheduleReconnect();
+            return false;
+        }
+    }, [getWebSocketUrl, createWebSocket]);
+
+    // 🔧 Reconnection Logic
+    const scheduleReconnect = useCallback(() => {
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+        }
+
+        reconnectAttempts.current++;
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 10000);
+
+        reconnectTimeoutRef.current = setTimeout(() => {
+            if (reconnectAttempts.current <= maxReconnectAttempts) {
+                connect();
+            }
+        }, delay);
+    }, [connect]);
+
+    // 🔧 Heartbeat System
+    const startHeartbeat = useCallback(() => {
+        if (heartbeatIntervalRef.current) {
+            clearInterval(heartbeatIntervalRef.current);
+        }
+
+        heartbeatIntervalRef.current = setInterval(() => {
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                try {
+                    ws.current.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+                } catch (err) {
+                    console.error('❌ Failed to send heartbeat:', err);
+                }
+            }
+        }, 30000);
+    }, []);
+
+    // 🔧 Send Message Function
+    const sendMessage = useCallback((message) => {
+        if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
+            console.warn('⚠️ Global WebSocket not connected');
+            return false;
+        }
+
+        try {
+            ws.current.send(JSON.stringify({ ...message, timestamp: Date.now() }));
+            return true;
+        } catch (err) {
+            console.error('❌ Failed to send message:', err);
+            return false;
+        }
+    }, []);
+
+    // 🔧 Project Subscription Functions
+    const subscribe = useCallback((subscription) => {
+        return sendMessage({
+            type: 'subscribe_project',
+            projectId: subscription.projectId
+        });
+    }, [sendMessage]);
+
+    const unsubscribe = useCallback((subscription) => {
+        return sendMessage({
+            type: 'unsubscribe_project',
+            projectId: subscription.projectId
+        });
+    }, [sendMessage]);
+
+    // 🔧 Alarm Functions
+    const acknowledgeAlarm = useCallback((projectId, ruleId, message = 'Acknowledged') => {
+        return sendMessage({
+            type: 'acknowledge_alarm',
+            projectId: parseInt(projectId),
+            ruleId: parseInt(ruleId),
+            message
+        });
+    }, [sendMessage]);
+
+    const getActiveAlarms = useCallback((projectId) => {
+        return sendMessage({
+            type: 'get_active_alarms',
+            projectId: parseInt(projectId)
+        });
+    }, [sendMessage]);
+
+    // 🔧 Connection Management
+    const forceReconnect = useCallback(() => {
+        isIntentionalClose.current = false;
+        reconnectAttempts.current = 0;
+
+        if (ws.current) {
+            isIntentionalClose.current = true;
+            ws.current.close();
+        }
+
+        setTimeout(() => {
+            isIntentionalClose.current = false;
+            connect();
+        }, 1000);
+    }, [connect]);
+
+    const disconnect = useCallback(() => {
+        isIntentionalClose.current = true;
+
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+        }
+        if (heartbeatIntervalRef.current) {
+            clearInterval(heartbeatIntervalRef.current);
+        }
+
+        if (ws.current) {
+            ws.current.close(1000, 'Intentional disconnect');
+        }
+    }, []);
+
+    // 🔧 Initialize Connection
+    useEffect(() => {
+        isIntentionalClose.current = false;
+        connect();
+
+        return () => {
+            isIntentionalClose.current = true;
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
+            }
+            if (heartbeatIntervalRef.current) {
+                clearInterval(heartbeatIntervalRef.current);
+            }
+            if (ws.current) {
+                ws.current.close(1000, 'Component unmounted');
+            }
+        };
+    }, [connect]);
 
     return {
         isConnected,
+        lastMessage,
         error,
-        connectionHistory,
-        disconnectionCount,
-        isHealthy: isConnected && !error,
-        lastConnectionTime: connectionHistory
-            .filter(h => h.status === 'connected')
-            .slice(-1)[0]?.timestamp
+        connectionAttempts,
+        sendMessage,
+        subscribe,
+        unsubscribe,
+        acknowledgeAlarm,
+        getActiveAlarms,
+        forceReconnect,
+        disconnect,
+        reconnectAttempts: reconnectAttempts.current,
+        maxReconnectAttempts
     };
 }
 
-// Export individual hooks for specific use cases
+// Export all hooks
 export { useWebSocket as useCustomWebSocket };

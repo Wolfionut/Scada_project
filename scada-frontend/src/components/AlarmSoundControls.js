@@ -132,30 +132,27 @@ export function AlarmSoundControls({ variant = 'compact' }) {
                             <Stack direction="row" spacing={2}>
                                 <Button
                                     variant="outlined"
-                                    color="info"
-                                    startIcon={<TestIcon />}
-                                    onClick={() => playTestSound('info')}
                                     size="small"
-                                >
-                                    Info
-                                </Button>
-                                <Button
-                                    variant="outlined"
-                                    color="warning"
                                     startIcon={<TestIcon />}
                                     onClick={() => playTestSound('warning')}
-                                    size="small"
                                 >
-                                    Warning
+                                    Test Warning
                                 </Button>
                                 <Button
                                     variant="outlined"
-                                    color="error"
+                                    size="small"
                                     startIcon={<TestIcon />}
                                     onClick={() => playTestSound('critical')}
-                                    size="small"
                                 >
-                                    Critical
+                                    Test Critical
+                                </Button>
+                                <Button
+                                    variant="outlined"
+                                    size="small"
+                                    startIcon={<StopIcon />}
+                                    onClick={stopAlarm}
+                                >
+                                    Stop Sound
                                 </Button>
                             </Stack>
                         </Box>

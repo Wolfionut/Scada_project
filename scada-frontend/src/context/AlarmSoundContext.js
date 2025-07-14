@@ -1,4 +1,4 @@
-// src/context/AlarmSoundContext.js - Global Alarm Sound Management (FIXED)
+// src/context/AlarmSoundContext.js - Global Alarm Sound Management
 import React, { createContext, useContext, useRef, useState, useEffect, useCallback } from 'react';
 
 const AlarmSoundContext = createContext();
@@ -65,28 +65,37 @@ export function AlarmSoundProvider({ children }) {
         return true;
     }, []);
 
-    // Generate alarm tone using Web Audio API
+    // Generate tone using Web Audio API
     const generateTone = useCallback((frequency, duration, volume = 0.5) => {
-        if (!audioContextRef.current) return null;
+        if (!audioContextRef.current) {
+            console.error('❌ Audio context not available');
+            return;
+        }
 
-        const oscillator = audioContextRef.current.createOscillator();
-        const gainNode = audioContextRef.current.createGain();
+        try {
+            const oscillator = audioContextRef.current.createOscillator();
+            const gainNode = audioContextRef.current.createGain();
 
-        oscillator.connect(gainNode);
-        gainNode.connect(audioContextRef.current.destination);
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContextRef.current.destination);
 
-        oscillator.frequency.setValueAtTime(frequency, audioContextRef.current.currentTime);
-        oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(frequency, audioContextRef.current.currentTime);
+            oscillator.type = 'sine';
 
-        // Envelope for smooth sound
-        gainNode.gain.setValueAtTime(0, audioContextRef.current.currentTime);
-        gainNode.gain.linearRampToValueAtTime(volume * masterVolume, audioContextRef.current.currentTime + 0.01);
-        gainNode.gain.exponentialRampToValueAtTime(0.001, audioContextRef.current.currentTime + duration);
+            const adjustedVolume = volume * masterVolume;
+            gainNode.gain.setValueAtTime(0, audioContextRef.current.currentTime);
+            gainNode.gain.linearRampToValueAtTime(adjustedVolume, audioContextRef.current.currentTime + 0.01);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioContextRef.current.currentTime + duration);
 
-        oscillator.start(audioContextRef.current.currentTime);
-        oscillator.stop(audioContextRef.current.currentTime + duration);
+            oscillator.start(audioContextRef.current.currentTime);
+            oscillator.stop(audioContextRef.current.currentTime + duration);
 
-        return oscillator;
+            currentSoundRef.current = oscillator;
+
+            console.log(`🔊 Generated tone: ${frequency}Hz for ${duration}s at ${adjustedVolume} volume`);
+        } catch (error) {
+            console.error('❌ Error generating tone:', error);
+        }
     }, [masterVolume]);
 
     // Play alarm sound sequence
@@ -145,6 +154,15 @@ export function AlarmSoundProvider({ children }) {
             intervalRef.current = null;
         }
 
+        if (currentSoundRef.current) {
+            try {
+                currentSoundRef.current.stop();
+                currentSoundRef.current = null;
+            } catch (error) {
+                console.log('Audio already stopped');
+            }
+        }
+
         setSoundStatus('idle');
         setCurrentAlarm(null);
 
@@ -174,61 +192,67 @@ export function AlarmSoundProvider({ children }) {
         console.log(`🔊 Alarm sounds ${newEnabled ? 'enabled' : 'disabled'}`);
     }, [isEnabled, stopAlarm]);
 
+    // Set enabled state directly
+    const setEnabled = useCallback((enabled) => {
+        setIsEnabled(enabled);
+        localStorage.setItem('alarmSoundsEnabled', enabled.toString());
+
+        if (!enabled) {
+            stopAlarm();
+        }
+
+        console.log(`🔊 Alarm sounds ${enabled ? 'enabled' : 'disabled'}`);
+    }, [stopAlarm]);
+
     // Set master volume
     const setVolume = useCallback((volume) => {
         const clampedVolume = Math.max(0, Math.min(1, volume));
         setMasterVolume(clampedVolume);
         localStorage.setItem('alarmMasterVolume', clampedVolume.toString());
+        console.log(`🔊 Master volume set to: ${Math.round(clampedVolume * 100)}%`);
     }, []);
 
-    // Handle page visibility change to resume audio context
-    useEffect(() => {
-        const handleVisibilityChange = async () => {
-            if (!document.hidden && audioContextRef.current && audioContextRef.current.state === 'suspended') {
-                try {
-                    await audioContextRef.current.resume();
-                    console.log('🔊 Audio context resumed');
-                } catch (error) {
-                    console.error('❌ Failed to resume audio context:', error);
-                }
-            }
-        };
-
-        document.addEventListener('visibilitychange', handleVisibilityChange);
-
-        return () => {
-            document.removeEventListener('visibilitychange', handleVisibilityChange);
-        };
-    }, []);
+    // Get current volume as percentage
+    const volume = masterVolume;
 
     // Cleanup on unmount
     useEffect(() => {
         return () => {
-            stopAlarm();
-            if (audioContextRef.current) {
-                audioContextRef.current.close();
+            if (intervalRef.current) {
+                clearTimeout(intervalRef.current);
+            }
+            if (currentSoundRef.current) {
+                try {
+                    currentSoundRef.current.stop();
+                } catch (error) {
+                    // Audio already stopped
+                }
             }
         };
-    }, [stopAlarm]);
+    }, []);
 
-    const contextValue = {
+    const value = {
         // State
         isEnabled,
-        masterVolume,
+        masterVolume: volume,
         currentAlarm,
         soundStatus,
 
-        // Actions
+        // Functions
         playAlarmSequence,
         stopAlarm,
         playTestSound,
         toggleSounds,
+        setEnabled,
         setVolume,
-        initAudioContext
+
+        // Aliases for compatibility
+        volume,
+        setVolume
     };
 
     return (
-        <AlarmSoundContext.Provider value={contextValue}>
+        <AlarmSoundContext.Provider value={value}>
             {children}
         </AlarmSoundContext.Provider>
     );

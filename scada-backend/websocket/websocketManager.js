@@ -1,54 +1,59 @@
-// websocket/websocketManager.js - Enhanced with Alarm Support
+// websocketManager.js - COMPLETE FIXED VERSION WITH WORKING ALARM SYSTEM
 const WebSocket = require('ws');
 const jwt = require('jsonwebtoken');
-const pool = require('../db');
+const EventEmitter = require('events');
 
-class WebSocketManager {
+class WebSocketManager extends EventEmitter {
     constructor(server) {
-        // 🚀 FIXED: Better error handling and validation
-        if (!server) {
-            console.error('❌ WebSocket: No HTTP server provided to WebSocketManager');
-            throw new Error('HTTP server is required for WebSocket initialization');
+        super();
+        this.wss = null;
+        this.clients = new Map();
+        this.projectSubscriptions = new Map();
+        this.heartbeatInterval = null;
+        this.isInitialized = false;
+
+        console.log('🔧 WebSocketManager: Initializing...');
+
+        // ✅ FIXED: Initialize immediately with server
+        if (server) {
+            this.initialize(server);
         }
+    }
 
-        console.log('🌐 Initializing WebSocket server...');
-
+    // Initialize WebSocket server
+    initialize(server) {
         try {
+            console.log('🔧 WebSocketManager: Creating WebSocket server...');
+
+            // Create WebSocket server
             this.wss = new WebSocket.Server({
-                server, // Make sure this is the HTTP server instance
+                server: server,
+                path: '/ws',
                 verifyClient: this.verifyClient.bind(this)
             });
 
-            console.log('✅ WebSocket server created successfully');
+            // Set up event handlers
+            this.wss.on('connection', this.handleConnection.bind(this));
+            this.wss.on('error', this.handleServerError.bind(this));
+
+            // Start heartbeat
+            this.startHeartbeat();
+
+            this.isInitialized = true;
+            console.log('✅ WebSocketManager: Successfully initialized');
+            console.log('💓 WebSocket: Heartbeat started');
+
+            return true;
         } catch (error) {
-            console.error('❌ Failed to create WebSocket server:', error);
-
-            // 🚀 FALLBACK: Create standalone WebSocket server
-            console.log('🔄 Attempting fallback WebSocket server on port 4001...');
-            try {
-                this.wss = new WebSocket.Server({
-                    port: 4001,
-                    verifyClient: this.verifyClient.bind(this)
-                });
-                console.log('✅ Fallback WebSocket server created on port 4001');
-                this.fallbackPort = 4001;
-            } catch (fallbackError) {
-                console.error('❌ Fallback WebSocket server also failed:', fallbackError);
-                throw fallbackError;
-            }
+            console.error('❌ WebSocketManager: Initialization failed:', error);
+            return false;
         }
-
-        this.clients = new Map();
-        this.projectSubscriptions = new Map();
-
-        this.wss.on('connection', this.handleConnection.bind(this));
-        console.log('🌐 WebSocket server initialized and ready');
     }
 
-    // Verify client authentication
+    // Verify client connection with JWT
     verifyClient(info) {
         try {
-            const url = new URL(info.req.url, 'ws://localhost');
+            const url = new URL(info.req.url, `http://${info.req.headers.host}`);
             const token = url.searchParams.get('token');
 
             if (!token) {
@@ -56,518 +61,511 @@ class WebSocketManager {
                 return false;
             }
 
+            // Verify JWT token
             const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+
+            // Store user info for later use
             info.req.user = decoded;
-            console.log('✅ WebSocket: Token verified for user', decoded.id);
+
+            console.log('✅ WebSocket: Client verified:', decoded.username);
             return true;
+
         } catch (error) {
-            console.log('❌ WebSocket: Invalid token', error.message);
+            console.error('❌ WebSocket: Token verification failed:', error.message);
             return false;
         }
     }
 
     // Handle new WebSocket connection
     handleConnection(ws, req) {
-        const user = req.user;
-        const clientId = this.generateClientId();
+        try {
+            const clientId = this.generateClientId();
+            const user = req.user;
 
-        this.clients.set(clientId, {
-            ws,
-            user,
-            subscriptions: new Set(),
-            connected_at: new Date(),
-            last_ping: new Date()
-        });
+            console.log(`🔌 WebSocket: New client connected - ${user.username} (${clientId})`);
 
-        console.log(`🔌 WebSocket client connected: ${user.username} (${clientId})`);
+            // Store client info
+            const clientInfo = {
+                id: clientId,
+                ws: ws,
+                user: user,
+                subscriptions: new Set(),
+                isAlive: true,
+                connectedAt: new Date().toISOString()
+            };
 
-        this.sendToClient(clientId, {
-            type: 'connected',
-            message: 'Real-time SCADA data connection established',
-            server_time: new Date().toISOString(),
-            client_id: clientId
-        });
+            this.clients.set(clientId, clientInfo);
 
-        ws.on('message', (data) => {
-            this.handleMessage(clientId, data);
-        });
+            // Set up client event handlers
+            ws.on('message', (message) => this.handleMessage(clientId, message));
+            ws.on('close', () => this.handleDisconnection(clientId));
+            ws.on('error', (error) => this.handleClientError(clientId, error));
+            ws.on('pong', () => this.handlePong(clientId));
 
-        ws.on('close', () => {
-            this.handleDisconnection(clientId);
-        });
+            // Send connection confirmation
+            this.sendToClient(clientId, {
+                type: 'connected',
+                clientId: clientId,
+                timestamp: new Date().toISOString()
+            });
 
-        ws.on('error', (error) => {
-            console.error(`❌ WebSocket error for client ${clientId}:`, error);
-        });
+            console.log(`✅ WebSocket: Client ${clientId} setup complete`);
 
-        ws.on('pong', () => {
-            const client = this.clients.get(clientId);
-            if (client) {
-                client.last_ping = new Date();
-            }
-        });
+        } catch (error) {
+            console.error('❌ WebSocket: Connection setup failed:', error);
+            ws.close(1011, 'Setup failed');
+        }
     }
 
-    // Handle incoming messages from clients
-    handleMessage(clientId, data) {
+    // Handle incoming messages
+    handleMessage(clientId, message) {
         try {
-            const message = JSON.parse(data);
             const client = this.clients.get(clientId);
-
             if (!client) return;
 
-            console.log(`📨 WebSocket message from ${clientId}:`, message.type);
+            const data = JSON.parse(message.toString());
+            console.log(`📨 WebSocket: Message from ${clientId}:`, data.type);
 
-            switch (message.type) {
+            switch (data.type) {
                 case 'ping':
-                    this.sendToClient(clientId, { type: 'pong', timestamp: new Date().toISOString() });
+                    this.sendToClient(clientId, { type: 'pong', timestamp: Date.now() });
                     break;
 
                 case 'subscribe_project':
-                    this.subscribeToProject(clientId, message.projectId);
+                    this.subscribeClientToProject(clientId, data.projectId);
                     break;
 
                 case 'unsubscribe_project':
-                    this.unsubscribeFromProject(clientId, message.projectId);
-                    break;
-
-                case 'get_current_data':
-                    this.sendCurrentData(clientId, message.projectId);
-                    break;
-
-                // NEW: Alarm-specific message types
-                case 'get_active_alarms':
-                    this.sendActiveAlarms(clientId, message.projectId);
+                    this.unsubscribeClientFromProject(clientId, data.projectId);
                     break;
 
                 case 'acknowledge_alarm':
-                    this.handleAlarmAck(clientId, message.projectId, message.ruleId, message.message);
+                    this.handleAlarmAcknowledgment(clientId, data);
+                    break;
+
+                case 'get_active_alarms':
+                    this.handleGetActiveAlarms(clientId, data.projectId);
+                    break;
+
+                case 'get_diagram_realtime':
+                    this.handleGetDiagramRealtime(clientId, data.projectId);
                     break;
 
                 default:
-                    console.log(`⚠️ Unknown WebSocket message type: ${message.type}`);
+                    console.log(`⚠️ WebSocket: Unknown message type: ${data.type}`);
             }
+
         } catch (error) {
-            console.error('Error handling WebSocket message:', error);
-            this.sendToClient(clientId, {
-                type: 'error',
-                message: 'Invalid message format'
-            });
+            console.error(`❌ WebSocket: Message handling error for ${clientId}:`, error);
         }
     }
 
     // Subscribe client to project updates
-    async subscribeToProject(clientId, projectId) {
-        const client = this.clients.get(clientId);
-        if (!client) return;
-
+    subscribeClientToProject(clientId, projectId) {
         try {
-            // 🚀 CRITICAL FIX: Ensure projectId is an integer
-            const normalizedProjectId = parseInt(projectId);
+            const client = this.clients.get(clientId);
+            if (!client) return;
 
-            console.log(`🐛 DEBUG: Subscribe - Raw projectId: ${projectId} (${typeof projectId}), Normalized: ${normalizedProjectId} (${typeof normalizedProjectId})`);
+            // Add to client subscriptions
+            client.subscriptions.add(projectId);
 
-            const projectQuery = await pool.query(
-                'SELECT * FROM projects WHERE id = $1 AND user_id = $2',
-                [normalizedProjectId, client.user.id]
-            );
-
-            if (projectQuery.rows.length === 0) {
-                this.sendToClient(clientId, {
-                    type: 'error',
-                    message: 'Access denied to project'
-                });
-                return;
+            // Add to project subscriptions map
+            if (!this.projectSubscriptions.has(projectId)) {
+                this.projectSubscriptions.set(projectId, new Set());
             }
+            this.projectSubscriptions.get(projectId).add(clientId);
 
-            client.subscriptions.add(normalizedProjectId);  // Store as integer
+            console.log(`📡 WebSocket: Client ${clientId} subscribed to project ${projectId}`);
 
-            if (!this.projectSubscriptions.has(normalizedProjectId)) {
-                this.projectSubscriptions.set(normalizedProjectId, new Set());
-            }
-            this.projectSubscriptions.get(normalizedProjectId).add(clientId);
-
-            console.log(`📡 Client ${clientId} subscribed to project ${normalizedProjectId} (integer)`);
-            console.log(`🐛 DEBUG: Current projectSubscriptions keys:`, Array.from(this.projectSubscriptions.keys()));
-
+            // Send subscription confirmation
             this.sendToClient(clientId, {
                 type: 'subscribed',
-                projectId: normalizedProjectId,
-                message: `Subscribed to real-time updates for project ${normalizedProjectId}`
+                projectId: projectId,
+                timestamp: new Date().toISOString()
             });
 
-            this.sendProjectStatus(clientId, normalizedProjectId);
-            this.sendActiveAlarms(clientId, normalizedProjectId);
+            // Emit event for other systems to handle
+            this.emit('client_subscribed', { clientId, projectId, user: client.user });
 
         } catch (error) {
-            console.error('Error subscribing to project:', error);
-            this.sendToClient(clientId, {
-                type: 'error',
-                message: 'Failed to subscribe to project'
-            });
+            console.error(`❌ WebSocket: Subscription error:`, error);
         }
     }
 
-
-    // Send current project status
-    async sendProjectStatus(clientId, projectId) {
+    // Unsubscribe client from project
+    unsubscribeClientFromProject(clientId, projectId) {
         try {
-            const devicesQuery = await pool.query(
-                'SELECT * FROM devices WHERE project_id = $1',
-                [projectId]
-            );
+            const client = this.clients.get(clientId);
+            if (!client) return;
 
-            const measurementsQuery = await pool.query(`
-                SELECT m.*, t.tag_name, t.tag_type, d.device_name
-                FROM measurements m
-                         JOIN tags t ON m.tag_id = t.tag_id
-                         JOIN devices d ON t.device_id = d.device_id
-                WHERE d.project_id = $1
-                  AND m.timestamp > NOW() - INTERVAL '1 hour'
-                ORDER BY m.timestamp DESC
-                    LIMIT 100
-            `, [projectId]);
+            // Remove from client subscriptions
+            client.subscriptions.delete(projectId);
 
-            this.sendToClient(clientId, {
-                type: 'project_status',
-                projectId,
-                data: {
-                    devices: devicesQuery.rows,
-                    recent_measurements: measurementsQuery.rows,
-                    timestamp: new Date().toISOString()
+            // Remove from project subscriptions map
+            const projectClients = this.projectSubscriptions.get(projectId);
+            if (projectClients) {
+                projectClients.delete(clientId);
+                if (projectClients.size === 0) {
+                    this.projectSubscriptions.delete(projectId);
                 }
+            }
+
+            console.log(`📡 WebSocket: Client ${clientId} unsubscribed from project ${projectId}`);
+
+            // Send unsubscription confirmation
+            this.sendToClient(clientId, {
+                type: 'unsubscribed',
+                projectId: projectId,
+                timestamp: new Date().toISOString()
             });
 
+            this.emit('client_unsubscribed', { clientId, projectId, user: client.user });
+
         } catch (error) {
-            console.error('Error sending project status:', error);
+            console.error(`❌ WebSocket: Unsubscription error:`, error);
         }
     }
 
-    // Send current data for a project
-    async sendCurrentData(clientId, projectId) {
+    // Handle alarm acknowledgment
+    handleAlarmAcknowledgment(clientId, data) {
         try {
-            const query = `
-                SELECT DISTINCT ON (t.tag_id)
-                    m.*, t.tag_name, t.tag_type, d.device_name, d.device_id
-                FROM measurements m
-                    JOIN tags t ON m.tag_id = t.tag_id
-                    JOIN devices d ON t.device_id = d.device_id
-                WHERE d.project_id = $1
-                ORDER BY t.tag_id, m.timestamp DESC
-            `;
+            const client = this.clients.get(clientId);
+            if (!client) return;
 
-            const result = await pool.query(query, [projectId]);
+            console.log(`🚨 WebSocket: Alarm acknowledgment from ${clientId}:`, {
+                projectId: data.projectId,
+                ruleId: data.ruleId,
+                message: data.message
+            });
 
+            // Emit event for alarm system to handle
+            this.emit('alarm_acknowledge', {
+                projectId: data.projectId,
+                ruleId: data.ruleId,
+                message: data.message || 'Acknowledged via WebSocket',
+                acknowledgedBy: client.user.username,
+                acknowledgedAt: new Date().toISOString()
+            });
+
+            // Send acknowledgment response
             this.sendToClient(clientId, {
-                type: 'current_data',
-                projectId,
-                data: result.rows,
+                type: 'alarm_ack_response',
+                success: true,
+                ruleId: data.ruleId,
                 timestamp: new Date().toISOString()
             });
 
         } catch (error) {
-            console.error('Error sending current data:', error);
+            console.error(`❌ WebSocket: Alarm acknowledgment error:`, error);
+            this.sendToClient(clientId, {
+                type: 'alarm_ack_response',
+                success: false,
+                error: error.message,
+                ruleId: data.ruleId
+            });
         }
     }
 
-    // NEW: Send active alarms for a project
-    async sendActiveAlarms(clientId, projectId) {
+    // Handle get active alarms request
+    handleGetActiveAlarms(clientId, projectId) {
         try {
-            const query = `
-                SELECT 
-                    s.*,
-                    r.rule_name,
-                    r.severity,
-                    r.threshold,
-                    r.condition_type,
-                    r.message as rule_message,
-                    t.tag_name,
-                    t.engineering_unit,
-                    d.device_name,
-                    d.device_type,
-                    u_ack.username as acknowledged_by_username
-                FROM alarm_states s
-                JOIN alarm_rules r ON s.rule_id = r.id
-                JOIN tags t ON s.tag_id = t.tag_id
-                JOIN devices d ON s.device_id = d.device_id
-                LEFT JOIN users u_ack ON s.acknowledged_by = u_ack.id
-                WHERE s.project_id = $1
-                ORDER BY s.triggered_at DESC
-            `;
+            console.log(`🚨 WebSocket: Active alarms requested by ${clientId} for project ${projectId}`);
 
-            const result = await pool.query(query, [projectId]);
-
-            this.sendToClient(clientId, {
-                type: 'active_alarms',
+            // Emit event for alarm system to handle
+            this.emit('get_active_alarms', {
+                clientId,
                 projectId,
-                data: result.rows,
                 timestamp: new Date().toISOString()
             });
 
         } catch (error) {
-            console.error('Error sending active alarms:', error);
+            console.error(`❌ WebSocket: Get active alarms error:`, error);
         }
     }
 
-    // NEW: Handle alarm acknowledgment via WebSocket
-    async handleAlarmAck(clientId, projectId, ruleId, ackMessage) {
-        const client = this.clients.get(clientId);
-        if (!client) return;
-
+    // Handle get diagram realtime data
+    handleGetDiagramRealtime(clientId, projectId) {
         try {
-            // Import alarm controller here to avoid circular dependency
-            const alarmController = require('../controllers/alarmController');
+            console.log(`📊 WebSocket: Diagram realtime data requested by ${clientId} for project ${projectId}`);
 
-            // Create a mock request/response for the controller
-            const mockReq = {
-                params: { projectId, ruleId },
-                body: { message: ackMessage },
-                user: client.user
-            };
-
-            const mockRes = {
-                json: (data) => {
-                    this.sendToClient(clientId, {
-                        type: 'alarm_ack_response',
-                        success: data.success,
-                        message: data.message,
-                        ruleId,
-                        projectId
-                    });
-                },
-                status: (code) => ({
-                    json: (data) => {
-                        this.sendToClient(clientId, {
-                            type: 'alarm_ack_error',
-                            error: data.error,
-                            details: data.details,
-                            ruleId,
-                            projectId
-                        });
-                    }
-                })
-            };
-
-            await alarmController.acknowledgeAlarm(mockReq, mockRes);
+            // Emit event for data collection engine to handle
+            this.emit('get_diagram_realtime', {
+                clientId,
+                projectId,
+                timestamp: new Date().toISOString()
+            });
 
         } catch (error) {
-            console.error('Error handling alarm acknowledgment:', error);
-            this.sendToClient(clientId, {
-                type: 'error',
-                message: 'Failed to acknowledge alarm'
-            });
+            console.error(`❌ WebSocket: Get diagram realtime error:`, error);
         }
     }
 
     // Handle client disconnection
     handleDisconnection(clientId) {
-        const client = this.clients.get(clientId);
-        if (!client) return;
+        try {
+            const client = this.clients.get(clientId);
+            if (!client) return;
 
-        console.log(`📴 WebSocket client disconnected: ${clientId}`);
+            console.log(`📴 WebSocket: Client ${clientId} disconnected`);
 
-        for (const projectId of client.subscriptions) {
-            if (this.projectSubscriptions.has(projectId)) {
-                this.projectSubscriptions.get(projectId).delete(clientId);
-
-                if (this.projectSubscriptions.get(projectId).size === 0) {
-                    this.projectSubscriptions.delete(projectId);
+            // Remove from all project subscriptions
+            client.subscriptions.forEach(projectId => {
+                const projectClients = this.projectSubscriptions.get(projectId);
+                if (projectClients) {
+                    projectClients.delete(clientId);
+                    if (projectClients.size === 0) {
+                        this.projectSubscriptions.delete(projectId);
+                    }
                 }
-            }
-        }
+            });
 
-        this.clients.delete(clientId);
+            // Remove client
+            this.clients.delete(clientId);
+
+            this.emit('client_disconnected', { clientId, user: client.user });
+
+        } catch (error) {
+            console.error(`❌ WebSocket: Disconnection handling error:`, error);
+        }
+    }
+
+    // Handle client errors
+    handleClientError(clientId, error) {
+        console.error(`❌ WebSocket: Client ${clientId} error:`, error.message);
+    }
+
+    // Handle server errors
+    handleServerError(error) {
+        console.error(`❌ WebSocket: Server error:`, error);
+    }
+
+    // Handle pong response
+    handlePong(clientId) {
+        const client = this.clients.get(clientId);
+        if (client) {
+            client.isAlive = true;
+        }
     }
 
     // Send message to specific client
     sendToClient(clientId, message) {
-        const client = this.clients.get(clientId);
-        if (!client || client.ws.readyState !== WebSocket.OPEN) {
-            return false;
-        }
-
         try {
+            const client = this.clients.get(clientId);
+            if (!client || client.ws.readyState !== WebSocket.OPEN) {
+                return false;
+            }
+
             client.ws.send(JSON.stringify(message));
             return true;
+
         } catch (error) {
-            console.error(`Error sending message to client ${clientId}:`, error);
+            console.error(`❌ WebSocket: Send to client ${clientId} failed:`, error);
             return false;
         }
     }
 
     // Broadcast to all clients subscribed to a project
     broadcastToProject(projectId, message) {
-        // 🚀 CRITICAL FIX: Ensure projectId is an integer
-        const normalizedProjectId = parseInt(projectId);
+        try {
+            const projectClients = this.projectSubscriptions.get(projectId);
+            if (!projectClients || projectClients.size === 0) {
+                console.log(`📡 WebSocket: No clients subscribed to project ${projectId}`);
+                return 0;
+            }
 
-        console.log('🐛 DEBUG broadcastToProject:', {
-            raw_projectId: projectId,
-            raw_type: typeof projectId,
-            normalized_projectId: normalizedProjectId,
-            normalized_type: typeof normalizedProjectId,
-            message_type: message.type,
-            total_project_subscriptions: this.projectSubscriptions.size,
-            subscription_keys: Array.from(this.projectSubscriptions.keys()),
-            has_subscribers_for_project: this.projectSubscriptions.has(normalizedProjectId)
-        });
+            let sentCount = 0;
+            projectClients.forEach(clientId => {
+                if (this.sendToClient(clientId, { ...message, projectId })) {
+                    sentCount++;
+                }
+            });
 
-        const subscribers = this.projectSubscriptions.get(normalizedProjectId);
-        if (!subscribers) {
-            console.log(`🐛 DEBUG: No subscribers for project ${normalizedProjectId} (integer)`);
+            console.log(`📡 WebSocket: Broadcast to project ${projectId} - ${sentCount}/${projectClients.size} clients`);
+            return sentCount;
+
+        } catch (error) {
+            console.error(`❌ WebSocket: Broadcast to project ${projectId} failed:`, error);
             return 0;
         }
-
-        console.log(`🐛 DEBUG: Found ${subscribers.size} subscribers for project ${normalizedProjectId}`);
-
-        let sentCount = 0;
-        for (const clientId of subscribers) {
-            const sent = this.sendToClient(clientId, message);
-            if (sent) {
-                sentCount++;
-                console.log(`🐛 DEBUG: Successfully sent to client ${clientId}`);
-            } else {
-                console.log(`🐛 DEBUG: Failed to send to client ${clientId}`);
-            }
-        }
-
-        return sentCount;
     }
 
-    // Broadcast new measurement data WITH ALARM EVALUATION
-    async broadcastMeasurement(projectId, measurementData) {
-        const message = {
-            type: 'measurement',
-            projectId,
-            data: measurementData,
-            timestamp: new Date().toISOString()
-        };
-
-        const sentCount = this.broadcastToProject(projectId, message);
-
-        if (sentCount > 0) {
-            console.log(`📤 Broadcasted measurement to ${sentCount} clients for project ${projectId}`);
-        }
-
-        // NEW: Trigger alarm evaluation for new measurements
+    // Broadcast to all connected clients
+    broadcastToAll(message) {
         try {
-            await this.evaluateAlarmsForMeasurement(measurementData);
-        } catch (error) {
-            console.error('❌ Error evaluating alarms for measurement:', error);
-        }
+            let sentCount = 0;
+            this.clients.forEach((client, clientId) => {
+                if (this.sendToClient(clientId, message)) {
+                    sentCount++;
+                }
+            });
 
-        return sentCount;
-    }
-
-    // NEW: Evaluate alarms when new measurements arrive
-    async evaluateAlarmsForMeasurement(measurementData) {
-        try {
-            // Import alarm controller here to avoid circular dependency
-            const alarmController = require('../controllers/alarmController');
-
-            // Format measurement data for alarm evaluation
-            const measurements = {};
-
-            if (Array.isArray(measurementData)) {
-                // Multiple measurements
-                measurementData.forEach(m => {
-                    measurements[m.tag_id] = {
-                        value: m.value,
-                        timestamp: m.timestamp,
-                        tag_id: m.tag_id
-                    };
-                });
-            } else {
-                // Single measurement
-                measurements[measurementData.tag_id] = {
-                    value: measurementData.value,
-                    timestamp: measurementData.timestamp,
-                    tag_id: measurementData.tag_id
-                };
-            }
-
-            // Evaluate alarms
-            const alarmEvents = await alarmController.evaluateAlarmConditions(measurements);
-
-            if (alarmEvents && alarmEvents.length > 0) {
-                console.log(`🚨 Generated ${alarmEvents.length} alarm events from measurement`);
-            }
+            console.log(`📡 WebSocket: Broadcast to all - ${sentCount}/${this.clients.size} clients`);
+            return sentCount;
 
         } catch (error) {
-            console.error('❌ Error in alarm evaluation:', error);
+            console.error(`❌ WebSocket: Broadcast to all failed:`, error);
+            return 0;
         }
     }
 
-    // Broadcast device status updates
-    broadcastDeviceStatus(projectId, deviceData) {
-        const message = {
-            type: 'device_status',
-            projectId,
-            data: {
-                device_id: deviceData.device_id,
-                device_name: deviceData.device_name,
-                status: deviceData.status,
-                running: deviceData.running,
-                timestamp: new Date().toISOString()
-            }
-        };
-
-        const sentCount = this.broadcastToProject(projectId, message);
-
-        if (sentCount > 0) {
-            console.log(`📤 Broadcasted device status to ${sentCount} clients for project ${projectId}`);
-        }
-
-        return sentCount;
-    }
-
-    // NEW: Broadcast alarm events
+    // ⭐ CRITICAL FIX: Broadcast alarm events with correct signature
     broadcastAlarmEvent(projectId, eventType, alarmData) {
-        const message = {
-            type: `alarm_${eventType}`,
-            projectId,
-            data: alarmData,
-            timestamp: new Date().toISOString()
-        };
-
-        const sentCount = this.broadcastToProject(projectId, message);
-
-        if (sentCount > 0) {
-            console.log(`🚨 Broadcasted alarm ${eventType} to ${sentCount} clients for project ${projectId}`);
-        }
-
-        return sentCount;
-    }
-
-    // NEW: Broadcast alarm summary updates
-    async broadcastAlarmSummary(projectId) {
         try {
-            const summaryQuery = `
-                SELECT 
-                    COUNT(*) as total_active,
-                    COUNT(CASE WHEN acknowledged_at IS NULL THEN 1 END) as unacknowledged,
-                    COUNT(CASE WHEN severity = 'critical' THEN 1 END) as critical,
-                    COUNT(CASE WHEN severity = 'warning' THEN 1 END) as warning,
-                    COUNT(CASE WHEN severity = 'info' THEN 1 END) as info,
-                    MAX(triggered_at) as latest_trigger
-                FROM alarm_states s
-                JOIN alarm_rules r ON s.rule_id = r.id
-                WHERE s.project_id = $1
-            `;
-
-            const result = await pool.query(summaryQuery, [projectId]);
+            console.log(`🚨 Broadcasting alarm event to project ${projectId}:`, eventType);
 
             const message = {
-                type: 'alarm_summary',
-                projectId,
-                data: result.rows[0],
+                type: eventType === 'triggered' ? 'alarm_triggered' :
+                    eventType === 'cleared' ? 'alarm_cleared' :
+                        eventType === 'acknowledged' ? 'alarm_acknowledged' : 'alarm_event',
+                data: alarmData,
+                projectId: projectId,
                 timestamp: new Date().toISOString()
             };
 
             return this.broadcastToProject(projectId, message);
 
         } catch (error) {
-            console.error('Error broadcasting alarm summary:', error);
+            console.error(`❌ WebSocket: Broadcast alarm event failed:`, error);
             return 0;
+        }
+    }
+
+    // ⭐ REQUIRED METHOD: Broadcast measurement data
+    broadcastMeasurement(projectId, measurementData) {
+        try {
+            const message = {
+                type: 'measurement',
+                data: measurementData,
+                projectId: projectId,
+                timestamp: new Date().toISOString()
+            };
+
+            return this.broadcastToProject(projectId, message);
+
+        } catch (error) {
+            console.error(`❌ WebSocket: Broadcast measurement failed:`, error);
+            return 0;
+        }
+    }
+
+    // ⭐ REQUIRED METHOD: Broadcast device status
+    broadcastDeviceStatus(projectId, deviceData) {
+        try {
+            const message = {
+                type: 'device_status',
+                data: deviceData,
+                projectId: projectId,
+                timestamp: new Date().toISOString()
+            };
+
+            return this.broadcastToProject(projectId, message);
+
+        } catch (error) {
+            console.error(`❌ WebSocket: Broadcast device status failed:`, error);
+            return 0;
+        }
+    }
+
+    // ⭐ CRITICAL FIX: Broadcast alarm summary (THIS WAS THE MAIN ISSUE!)
+    async broadcastAlarmSummary(projectId) {
+        try {
+            console.log(`📊 Generating and broadcasting alarm summary for project ${projectId}...`);
+
+            // 🔧 FIXED: Actually fetch alarm summary data from database
+            const pool = require('../db');
+
+            const summaryQuery = `
+                SELECT 
+                    COUNT(*) as total_active,
+                    COUNT(CASE WHEN r.severity = 'critical' THEN 1 END) as critical,
+                    COUNT(CASE WHEN r.severity = 'warning' THEN 1 END) as warning,
+                    COUNT(CASE WHEN r.severity = 'info' THEN 1 END) as info,
+                    COUNT(CASE WHEN s.acknowledged_at IS NULL THEN 1 END) as unacknowledged,
+                    COUNT(CASE WHEN s.acknowledged_at IS NOT NULL THEN 1 END) as acknowledged
+                FROM alarm_states s
+                JOIN alarm_rules r ON s.rule_id = r.id
+                WHERE s.project_id = $1 AND s.state = 'triggered'
+            `;
+
+            const summaryResult = await pool.query(summaryQuery, [projectId]);
+            const summary = summaryResult.rows[0];
+
+            // 🔧 FIXED: Create properly formatted summary data
+            const summaryData = {
+                total_active: parseInt(summary.total_active) || 0,
+                critical: parseInt(summary.critical) || 0,
+                warning: parseInt(summary.warning) || 0,
+                info: parseInt(summary.info) || 0,
+                unacknowledged: parseInt(summary.unacknowledged) || 0,
+                acknowledged: parseInt(summary.acknowledged) || 0,
+                has_active_alarms: parseInt(summary.total_active) > 0,
+                has_unacknowledged: parseInt(summary.unacknowledged) > 0,
+                timestamp: new Date().toISOString()
+            };
+
+            console.log(`📊 Generated alarm summary:`, summaryData);
+
+            const message = {
+                type: 'alarm_summary',
+                data: summaryData,
+                projectId: projectId,
+                timestamp: new Date().toISOString()
+            };
+
+            return this.broadcastToProject(projectId, message);
+
+        } catch (error) {
+            console.error(`❌ WebSocket: Broadcast alarm summary failed:`, error);
+            console.error(`❌ Error details:`, error.message);
+            return 0;
+        }
+    }
+
+    // ⭐ REQUIRED METHOD: Send active alarms to specific client
+    sendActiveAlarmsToClient(clientId, projectId, alarms) {
+        try {
+            const message = {
+                type: 'active_alarms',
+                data: alarms || [],
+                projectId: projectId,
+                timestamp: new Date().toISOString()
+            };
+
+            return this.sendToClient(clientId, message);
+
+        } catch (error) {
+            console.error(`❌ WebSocket: Send active alarms failed:`, error);
+            return false;
+        }
+    }
+
+    // Start heartbeat to check client connections
+    startHeartbeat() {
+        this.heartbeatInterval = setInterval(() => {
+            this.clients.forEach((client, clientId) => {
+                if (!client.isAlive) {
+                    console.log(`💔 WebSocket: Terminating dead client ${clientId}`);
+                    client.ws.terminate();
+                    this.handleDisconnection(clientId);
+                    return;
+                }
+
+                client.isAlive = false;
+                if (client.ws.readyState === WebSocket.OPEN) {
+                    client.ws.ping();
+                }
+            });
+        }, 30000); // 30 seconds
+
+        console.log('💓 WebSocket: Heartbeat started');
+    }
+
+    // Stop heartbeat
+    stopHeartbeat() {
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
+            console.log('💔 WebSocket: Heartbeat stopped');
         }
     }
 
@@ -576,82 +574,76 @@ class WebSocketManager {
         return `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     }
 
-    // Unsubscribe from project
-    unsubscribeFromProject(clientId, projectId) {
-        const client = this.clients.get(clientId);
-        if (!client) return;
-
-        // 🚀 CRITICAL FIX: Ensure projectId is an integer
-        const normalizedProjectId = parseInt(projectId);
-
-        client.subscriptions.delete(normalizedProjectId);
-
-        if (this.projectSubscriptions.has(normalizedProjectId)) {
-            this.projectSubscriptions.get(normalizedProjectId).delete(clientId);
-
-            if (this.projectSubscriptions.get(normalizedProjectId).size === 0) {
-                this.projectSubscriptions.delete(normalizedProjectId);
-            }
-        }
-
-        this.sendToClient(clientId, {
-            type: 'unsubscribed',
-            projectId: normalizedProjectId,
-            message: `Unsubscribed from project ${normalizedProjectId}`
-        });
-    }
-
-    // Get WebSocket server statistics
-    getStatistics() {
-        return {
-            total_connections: this.clients.size,
-            active_projects: this.projectSubscriptions.size,
-            fallback_port: this.fallbackPort || null,
-            uptime: process.uptime(),
-            timestamp: new Date().toISOString()
-        };
-    }
-
-    // Check if WebSocket is healthy
+    // ⭐ REQUIRED METHOD: Check if healthy
     isHealthy() {
+        return this.isInitialized && this.wss && this.wss.readyState !== WebSocket.CLOSED;
+    }
+
+    // Get connection statistics
+    getStats() {
+        const stats = {
+            totalClients: this.clients.size,
+            totalProjects: this.projectSubscriptions.size,
+            isInitialized: this.isInitialized,
+            clients: [],
+            projects: []
+        };
+
+        // Add client details
+        this.clients.forEach((client, clientId) => {
+            stats.clients.push({
+                id: clientId,
+                username: client.user.username,
+                subscriptions: Array.from(client.subscriptions),
+                connectedAt: client.connectedAt,
+                isAlive: client.isAlive
+            });
+        });
+
+        // Add project subscription details
+        this.projectSubscriptions.forEach((clients, projectId) => {
+            stats.projects.push({
+                projectId: projectId,
+                subscriberCount: clients.size,
+                subscribers: Array.from(clients)
+            });
+        });
+
+        return stats;
+    }
+
+    // Shutdown WebSocket server
+    shutdown() {
         try {
-            return {
-                healthy: true,
-                connections: this.clients.size,
-                projects: this.projectSubscriptions.size,
-                websocket_state: this.wss.readyState === WebSocket.OPEN ? 'OPEN' : 'CLOSED',
-                fallback_port: this.fallbackPort || null
-            };
+            console.log('🔌 WebSocket: Shutting down...');
+
+            this.stopHeartbeat();
+
+            // Close all client connections
+            this.clients.forEach((client, clientId) => {
+                client.ws.close(1001, 'Server shutdown');
+            });
+
+            // Close WebSocket server
+            if (this.wss) {
+                this.wss.close(() => {
+                    console.log('✅ WebSocket: Server closed successfully');
+                });
+            }
+
+            // Clear data structures
+            this.clients.clear();
+            this.projectSubscriptions.clear();
+            this.isInitialized = false;
+
         } catch (error) {
-            return {
-                healthy: false,
-                error: error.message
-            };
+            console.error('❌ WebSocket: Shutdown error:', error);
         }
     }
 
-    // Graceful shutdown
-    async shutdown() {
-        console.log('🛑 Shutting down WebSocket manager...');
-
-        // Notify all clients
-        for (const [clientId, client] of this.clients) {
-            this.sendToClient(clientId, {
-                type: 'server_shutdown',
-                message: 'Server is shutting down'
-            });
-            client.ws.close();
-        }
-
-        // Close WebSocket server
-        if (this.wss) {
-            this.wss.close(() => {
-                console.log('✅ WebSocket server closed');
-            });
-        }
-
-        this.clients.clear();
-        this.projectSubscriptions.clear();
+    // Check if WebSocket manager is ready
+    isReady() {
+        return this.isInitialized && this.wss && this.wss.readyState !== WebSocket.CLOSED;
     }
 }
 

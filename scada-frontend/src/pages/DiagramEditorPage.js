@@ -1,5 +1,5 @@
-// src/pages/DiagramEditorPage.js - Modern SCADA HMI Editor
-import React, { useState, useEffect, useRef } from 'react';
+// src/pages/DiagramEditorPage.js - COMPLETE FIXED VERSION
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Stage, Layer, Line } from 'react-konva';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
@@ -8,7 +8,8 @@ import {
     Dialog, DialogTitle, DialogContent, DialogActions, TextField, MenuItem,
     FormControl, InputLabel, Select, Switch, FormControlLabel, Tabs, Tab,
     List, ListItem, ListItemText, ListItemIcon, Accordion, AccordionSummary,
-    AccordionDetails, Slider, Grid, Avatar, Badge
+    AccordionDetails, Slider, Grid, Avatar, Badge, CircularProgress,
+    Autocomplete
 } from '@mui/material';
 import {
     ArrowBack as ArrowBackIcon,
@@ -30,16 +31,42 @@ import {
     PlayArrow as PlayArrowIcon,
     Pause as PauseIcon,
     Wifi as WifiIcon,
-    WifiOff as WifiOffIcon
+    WifiOff as WifiOffIcon,
+    Refresh as RefreshIcon,
+    CheckCircle as CheckCircleIcon,
+    Error as ErrorIcon,
+    Warning as WarningIcon,
+    TrendingUp as TrendingUpIcon,
+    TrendingDown as TrendingDownIcon,
+    Speed as SpeedIcon,
+    Circle as CircleIcon
 } from '@mui/icons-material';
 import axios from '../api/axios';
 
 // Import Modern Symbols
 import symbolList, { PipeComponent, statusTypes, sensorTypes } from '../symbols/symbolList';
 import { motion } from 'framer-motion';
+
+// Import your existing WebSocket hook
 import { useRealTimeData } from '../hooks/useWebSocket';
 
-// Modern Snackbar Component
+// 🚀 PERFORMANCE FIX 1: Throttled console logging
+const createThrottledLogger = () => {
+    let lastLogTime = 0;
+    const LOG_INTERVAL = 2000; // Only log every 2 seconds max
+
+    return (message, data) => {
+        const now = Date.now();
+        if (process.env.NODE_ENV === 'development' && now - lastLogTime > LOG_INTERVAL) {
+            console.log(message, data);
+            lastLogTime = now;
+        }
+    };
+};
+
+const throttledLog = createThrottledLogger();
+
+// Enhanced Snackbar Component
 function ModernSnackbar({ open, onClose, message, severity = "success" }) {
     if (!open) return null;
     return (
@@ -65,54 +92,248 @@ function ModernSnackbar({ open, onClose, message, severity = "success" }) {
     );
 }
 
-// Enhanced Properties Panel with Real-time Data
-function ElementPropertiesPanel({ selectedElement, onUpdateElement, tags, devices, measurements, isConnected }) {
+// 🚀 PERFORMANCE FIX 2: More aggressive memoization for Properties Panel
+const EnhancedElementPropertiesPanel = React.memo(function EnhancedElementPropertiesPanel({
+                                                                                              selectedElement,
+                                                                                              onUpdateElement,
+                                                                                              tags,
+                                                                                              measurements,
+                                                                                              isConnected,
+                                                                                              projectId,
+                                                                                              getTagDataByName,
+                                                                                              onSaveDiagram // 🚀 NEW: Save function for auto-save before linking
+                                                                                          }) {
     const [linkedTag, setLinkedTag] = useState('');
     const [displayName, setDisplayName] = useState('');
     const [color, setColor] = useState('#2563eb');
     const [sensorType, setSensorType] = useState('temperature');
+    const [loading, setLoading] = useState(false);
+    const [tagSuggestions, setTagSuggestions] = useState([]);
+    const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+
+    // 🚀 PERFORMANCE FIX 3: Throttled updates
+    const throttledUpdate = useCallback(
+        (() => {
+            let timeoutId = null;
+            return (elementId, updatedData) => {
+                if (timeoutId) clearTimeout(timeoutId);
+                timeoutId = setTimeout(() => {
+                    onUpdateElement(elementId, updatedData);
+                }, 100); // Batch updates every 100ms
+            };
+        })(),
+        [onUpdateElement]
+    );
 
     useEffect(() => {
         if (selectedElement) {
             setLinkedTag(selectedElement.linkedTag || '');
-            setDisplayName(selectedElement.displayName || selectedElement.key || '');
+            setDisplayName(selectedElement.displayName || selectedElement.name || '');
             setColor(selectedElement.color || '#2563eb');
             setSensorType(selectedElement.sensorType || 'temperature');
-        }
-    }, [selectedElement]);
 
-    const handleUpdate = () => {
-        if (selectedElement) {
+            // Only fetch suggestions if not already loaded
+            if (tagSuggestions.length === 0) {
+                fetchTagSuggestions();
+            }
+        }
+    }, [selectedElement?.id]); // 🚀 Only depend on ID, not full object
+
+    const fetchTagSuggestions = useCallback(async () => {
+        if (!selectedElement || !projectId) return;
+
+        try {
+            setLoadingSuggestions(true);
+            const elementType = selectedElement.key || selectedElement.type || 'sensor';
+
+            try {
+                const response = await axios.get(`/diagrams/project/${projectId}/tag-suggestions/${elementType}`);
+                const suggestions = response.data.suggestions || [];
+                setTagSuggestions(suggestions);
+
+                if (suggestions.length === 0) {
+                    throw new Error('No suggestions from endpoint');
+                }
+            } catch (suggestionsError) {
+                // Fallback: Get all tags for the project
+                const allTagsResponse = await axios.get(`/tags/project/${projectId}`);
+                const allTags = allTagsResponse.data || [];
+
+                const fallbackSuggestions = allTags.map(tag => ({
+                    ...tag,
+                    compatibility_score: getCompatibilityScore(tag, elementType),
+                    suggestion_reason: getCompatibilityReason(tag, elementType),
+                    is_linked: false,
+                    current_value: null
+                }));
+
+                fallbackSuggestions.sort((a, b) => b.compatibility_score - a.compatibility_score);
+                setTagSuggestions(fallbackSuggestions);
+            }
+
+        } catch (error) {
+            console.error('❌ Failed to fetch tag data:', error);
+            setTagSuggestions([]);
+        } finally {
+            setLoadingSuggestions(false);
+        }
+    }, [selectedElement?.key, projectId]); // 🚀 Reduced dependencies
+
+    const getCompatibilityScore = useCallback((tag, elementType) => {
+        const tagName = tag.tag_name?.toLowerCase() || '';
+        const tagType = tag.tag_type?.toLowerCase() || '';
+
+        let score = 50;
+
+        switch (elementType) {
+            case 'tank':
+                if (tagName.includes('level') || tagName.includes('tank')) score += 30;
+                if (tagType === 'analog') score += 10;
+                break;
+            case 'pump':
+                if (tagName.includes('pump') || tagName.includes('speed') || tagName.includes('rpm')) score += 30;
+                if (tagType === 'analog') score += 10;
+                break;
+            case 'valve':
+                if (tagName.includes('valve') || tagName.includes('position')) score += 30;
+                if (tagType === 'analog' || tagType === 'digital') score += 10;
+                break;
+            case 'sensor':
+                if (tagName.includes('temp') || tagName.includes('pressure') || tagName.includes('sensor')) score += 30;
+                if (tagType === 'analog') score += 15;
+                break;
+            case 'motor':
+                if (tagName.includes('motor') || tagName.includes('rpm') || tagName.includes('speed')) score += 30;
+                if (tagType === 'analog') score += 10;
+                break;
+        }
+
+        return Math.min(score, 100);
+    }, []);
+
+    const getCompatibilityReason = useCallback((tag, elementType) => {
+        const score = getCompatibilityScore(tag, elementType);
+        if (score >= 80) return `Highly compatible with ${elementType}`;
+        if (score >= 60) return `Good match for ${elementType}`;
+        return `Available for linking to ${elementType}`;
+    }, [getCompatibilityScore]);
+
+    const handleLinkTag = useCallback(async () => {
+        if (!selectedElement || !linkedTag || !projectId) return;
+
+        try {
+            setLoading(true);
+
+            // 🚀 AUTO-SAVE DIAGRAM FIRST (Critical Fix!)
+            console.log('🔗 Step 1: Auto-saving diagram before linking tag...');
+
+            try {
+                if (typeof onSaveDiagram === 'function') {
+                    await onSaveDiagram(); // Auto-save the diagram first
+                    console.log('✅ Step 1 Complete: Diagram auto-saved successfully');
+                } else {
+                    console.warn('⚠️ Step 1 Warning: No save function available, proceeding without save');
+                }
+
+                // Small delay to ensure database consistency
+                await new Promise(resolve => setTimeout(resolve, 300));
+
+            } catch (saveError) {
+                console.error('❌ Step 1 Failed: Auto-save failed:', saveError);
+                throw new Error(`Please save your diagram first: ${saveError.message}`);
+            }
+
+            // 🚀 Step 2: Now attempt to link the tag
+            console.log('🔗 Step 2: Linking tag to element...');
+
+            const response = await axios.post(
+                `/diagrams/project/${projectId}/elements/${selectedElement.id}/link-tag`,
+                {
+                    tag_name: linkedTag,
+                    display_settings: {
+                        showValue: true,
+                        showUnit: true,
+                        showAlarmStatus: true
+                    }
+                }
+            );
+
+            console.log('✅ Step 2 Complete: Tag linked successfully');
+            onUpdateElement(selectedElement.id, response.data.element);
+
+        } catch (error) {
+            console.error('❌ Failed to link tag:', error);
+
+            // Enhanced error message based on error type
+            let errorMessage = 'Failed to link tag';
+
+            if (error.response?.status === 404) {
+                errorMessage = '❌ Element not found in saved diagram. Please save your diagram first and try again.';
+            } else if (error.message.includes('save')) {
+                errorMessage = error.message;
+            } else {
+                errorMessage = `❌ ${error.response?.data?.error || error.message}`;
+            }
+
+            alert(errorMessage);
+        } finally {
+            setLoading(false);
+        }
+    }, [selectedElement?.id, linkedTag, projectId, onUpdateElement, onSaveDiagram]);
+
+    const handleUnlinkTag = useCallback(async () => {
+        if (!selectedElement || !projectId) return;
+
+        try {
+            setLoading(true);
+
+            await axios.delete(
+                `/diagrams/project/${projectId}/elements/${selectedElement.id}/unlink-tag`
+            );
+
             onUpdateElement(selectedElement.id, {
                 ...selectedElement,
-                linkedTag,
-                displayName,
-                color,
-                sensorType
+                linkedTag: null,
+                linkedTagId: null,
+                realtime_data: null
             });
-        }
-    };
 
-    // Get real-time value for linked tag
-    const getRealTimeValue = () => {
-        if (linkedTag && measurements[linkedTag]) {
-            return measurements[linkedTag].value;
+            setLinkedTag('');
+
+        } catch (error) {
+            console.error('❌ Failed to unlink tag:', error);
+            alert(`Failed to unlink tag: ${error.response?.data?.error || error.message}`);
+        } finally {
+            setLoading(false);
         }
-        return null;
-    };
+    }, [selectedElement?.id, projectId, onUpdateElement]);
+
+    // 🚀 PERFORMANCE FIX 4: Memoized real-time value to prevent constant lookups
+    const realTimeData = useMemo(() => {
+        if (!selectedElement?.linkedTag || !getTagDataByName) return null;
+        return getTagDataByName(selectedElement.linkedTag);
+    }, [selectedElement?.linkedTag, getTagDataByName, measurements]); // Include measurements to trigger updates
+
+    const formatValue = useCallback((value, unit, tagType) => {
+        if (tagType === 'digital') {
+            return value ? 'ON' : 'OFF';
+        }
+        if (typeof value === 'number') {
+            return `${value.toFixed(2)} ${unit || ''}`;
+        }
+        return `${value} ${unit || ''}`;
+    }, []);
 
     if (!selectedElement) {
         return (
             <Box sx={{ p: 3, textAlign: 'center' }}>
                 <SettingsIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 2 }} />
                 <Typography variant="body1" color="text.secondary">
-                    Select an element to edit properties
+                    Select an element to configure properties and tag bindings
                 </Typography>
             </Box>
         );
     }
-
-    const realTimeValue = getRealTimeValue();
 
     return (
         <Box sx={{ p: 3 }}>
@@ -121,121 +342,379 @@ function ElementPropertiesPanel({ selectedElement, onUpdateElement, tags, device
             </Typography>
 
             {/* Real-time Status */}
-            <Card sx={{ mb: 3, bgcolor: isConnected ? 'success.50' : 'error.50' }}>
+            <Card sx={{
+                mb: 3,
+                bgcolor: isConnected ? 'success.50' : 'error.50',
+                border: `1px solid ${isConnected ? '#10b981' : '#ef4444'}`
+            }}>
                 <CardContent sx={{ p: 2 }}>
                     <Stack direction="row" alignItems="center" spacing={2}>
-                        {isConnected ? <WifiIcon color="success" /> : <WifiOffIcon color="error" />}
-                        <Box>
+                        {isConnected ?
+                            <WifiIcon sx={{ color: 'success.main' }} /> :
+                            <WifiOffIcon sx={{ color: 'error.main' }} />
+                        }
+                        <Box sx={{ flex: 1 }}>
                             <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
                                 {isConnected ? 'Live Data Connected' : 'Offline Mode'}
                             </Typography>
-                            {realTimeValue !== null && (
+                            {realTimeData && (
                                 <Typography variant="body2" color="text.secondary">
-                                    Current Value: {realTimeValue}
+                                    Current: {formatValue(realTimeData.value, realTimeData.engineering_unit || realTimeData.unit, realTimeData.tag_type)}
                                 </Typography>
                             )}
                         </Box>
+                        <Button
+                            size="small"
+                            onClick={fetchTagSuggestions}
+                            disabled={loadingSuggestions}
+                            startIcon={loadingSuggestions ? <CircularProgress size={16} /> : <RefreshIcon />}
+                        >
+                            Refresh
+                        </Button>
                     </Stack>
                 </CardContent>
             </Card>
 
             <Stack spacing={3}>
-                <TextField
-                    label="Display Name"
-                    value={displayName}
-                    onChange={e => setDisplayName(e.target.value)}
-                    fullWidth
-                    size="small"
-                />
-
-                <TextField
-                    label="Color"
-                    type="color"
-                    value={color}
-                    onChange={e => setColor(e.target.value)}
-                    fullWidth
-                    size="small"
-                />
-
-                {selectedElement.key === 'sensor' && (
-                    <FormControl fullWidth size="small">
-                        <InputLabel>Sensor Type</InputLabel>
-                        <Select
-                            value={sensorType}
-                            onChange={e => setSensorType(e.target.value)}
-                            label="Sensor Type"
-                        >
-                            {Object.entries(sensorTypes).map(([key, type]) => (
-                                <MenuItem key={key} value={key}>
-                                    {type.label}
-                                </MenuItem>
-                            ))}
-                        </Select>
-                    </FormControl>
-                )}
-
-                <FormControl fullWidth size="small">
-                    <InputLabel>Link to Tag</InputLabel>
-                    <Select
-                        value={linkedTag}
-                        onChange={e => setLinkedTag(e.target.value)}
-                        label="Link to Tag"
-                    >
-                        <MenuItem value="">None</MenuItem>
-                        {tags.map(tag => (
-                            <MenuItem key={tag.tag_id} value={tag.tag_name}>
-                                {tag.tag_name} ({tag.tag_type})
-                            </MenuItem>
-                        ))}
-                    </Select>
-                </FormControl>
-
-                {linkedTag && (
-                    <Alert severity="info" sx={{ fontSize: '0.75rem' }}>
-                        This element will display real-time data from tag: <strong>{linkedTag}</strong>
-                        {realTimeValue !== null && (
-                            <Box sx={{ mt: 1 }}>
-                                Real-time value: <strong>{realTimeValue}</strong>
-                            </Box>
+                {/* Element Info */}
+                <Box>
+                    <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1 }}>
+                        {selectedElement.displayName || selectedElement.name || selectedElement.id}
+                    </Typography>
+                    <Stack direction="row" spacing={1}>
+                        <Chip
+                            label={selectedElement.type || selectedElement.key}
+                            size="small"
+                            color="primary"
+                        />
+                        {selectedElement.linkedTag && (
+                            <Chip
+                                icon={<LinkIcon />}
+                                label="Linked"
+                                size="small"
+                                color="success"
+                            />
                         )}
-                    </Alert>
-                )}
+                    </Stack>
+                </Box>
 
-                <Button
-                    variant="contained"
-                    onClick={handleUpdate}
-                    fullWidth
-                    sx={{
-                        background: 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)'
-                    }}
-                >
-                    Apply Changes
-                </Button>
+                <Divider />
+
+                {/* Tag Binding Section */}
+                <Box>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 2 }}>
+                        Tag Binding
+                    </Typography>
+
+                    {selectedElement.linkedTag ? (
+                        // Currently linked
+                        <Card sx={{
+                            bgcolor: 'success.50',
+                            border: '1px solid',
+                            borderColor: 'success.200'
+                        }}>
+                            <CardContent sx={{ p: 2 }}>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                                    <LinkIcon color="success" fontSize="small" />
+                                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                        Linked to: {selectedElement.linkedTag}
+                                    </Typography>
+                                </Box>
+
+                                {realTimeData && (
+                                    <Box sx={{ mb: 2, p: 2, bgcolor: 'success.100', borderRadius: 1 }}>
+                                        <Typography variant="h5" sx={{ fontWeight: 700, color: 'success.dark' }}>
+                                            {formatValue(realTimeData.value, realTimeData.engineering_unit || realTimeData.unit, realTimeData.tag_type)}
+                                        </Typography>
+                                        <Typography variant="body2" color="text.secondary">
+                                            Status: {realTimeData.quality || realTimeData.status || 'GOOD'} • Device: {realTimeData.device_name}
+                                        </Typography>
+                                        <Typography variant="caption" color="text.secondary">
+                                            Last Update: {realTimeData.timestamp ?
+                                            new Date(realTimeData.timestamp).toLocaleTimeString() : 'Never'}
+                                        </Typography>
+                                    </Box>
+                                )}
+
+                                <Button
+                                    size="small"
+                                    onClick={handleUnlinkTag}
+                                    disabled={loading}
+                                    color="warning"
+                                    startIcon={<DeleteIcon />}
+                                >
+                                    {loading ? 'Unlinking...' : 'Unlink Tag'}
+                                </Button>
+                            </CardContent>
+                        </Card>
+                    ) : (
+                        // Not linked
+                        <Card sx={{
+                            bgcolor: 'warning.50',
+                            border: '1px solid',
+                            borderColor: 'warning.200'
+                        }}>
+                            <CardContent sx={{ p: 2 }}>
+                                <Typography variant="body2" sx={{ mb: 2 }}>
+                                    No tag linked to this element
+                                </Typography>
+
+                                {/* Auto-save Notice */}
+                                <Box sx={{
+                                    mb: 2,
+                                    p: 1.5,
+                                    bgcolor: 'info.50',
+                                    borderRadius: 1,
+                                    border: '1px solid',
+                                    borderColor: 'info.200'
+                                }}>
+                                    <Typography variant="caption" color="info.dark" sx={{ fontWeight: 600 }}>
+                                        💾 Note: Your diagram will be automatically saved before linking tags
+                                    </Typography>
+                                </Box>
+
+                                {/* Tag Selection with Suggestions */}
+                                <Box sx={{ mb: 2 }}>
+                                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                                        Available Tags: {tagSuggestions.length} found
+                                        {loadingSuggestions && ' (Loading...)'}
+                                    </Typography>
+
+                                    <Autocomplete
+                                        options={tagSuggestions}
+                                        getOptionLabel={(option) => option.tag_name || 'Unknown Tag'}
+                                        value={tagSuggestions.find(t => t.tag_name === linkedTag) || null}
+                                        onChange={(event, newValue) => {
+                                            setLinkedTag(newValue ? newValue.tag_name : '');
+                                        }}
+                                        loading={loadingSuggestions}
+                                        disabled={loading}
+                                        renderInput={(params) => (
+                                            <TextField
+                                                {...params}
+                                                label="Select Tag"
+                                                size="small"
+                                                helperText={`${tagSuggestions.length} tags available`}
+                                                InputProps={{
+                                                    ...params.InputProps,
+                                                    endAdornment: (
+                                                        <>
+                                                            {loadingSuggestions ? <CircularProgress color="inherit" size={20} /> : null}
+                                                            {params.InputProps.endAdornment}
+                                                        </>
+                                                    ),
+                                                }}
+                                            />
+                                        )}
+                                        renderOption={(props, option) => (
+                                            <Box component="li" {...props} key={option.tag_id || option.tag_name}>
+                                                <Box sx={{ width: '100%' }}>
+                                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                                            {option.tag_name}
+                                                            {option.is_linked && ' (Already Linked)'}
+                                                        </Typography>
+                                                        <Chip
+                                                            label={`${option.compatibility_score || 50}%`}
+                                                            size="small"
+                                                            color={
+                                                                (option.compatibility_score || 50) > 80 ? 'success' :
+                                                                    (option.compatibility_score || 50) > 60 ? 'warning' : 'default'
+                                                            }
+                                                        />
+                                                    </Box>
+                                                    <Typography variant="caption" color="text.secondary">
+                                                        {option.tag_type} • {option.device_name || 'Unknown Device'}
+                                                    </Typography>
+                                                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                                                        {option.suggestion_reason || 'Available for linking'}
+                                                    </Typography>
+                                                    {(option.current_value !== null && option.current_value !== undefined) && (
+                                                        <Typography variant="caption" color="primary.main" sx={{ display: 'block' }}>
+                                                            Current: {option.current_value} {option.engineering_unit || ''}
+                                                        </Typography>
+                                                    )}
+                                                </Box>
+                                            </Box>
+                                        )}
+                                        noOptionsText={
+                                            loadingSuggestions ? "Loading tags..." :
+                                                "No tags found. Create tags in the Tags page first."
+                                        }
+                                        sx={{ mb: 1 }}
+                                    />
+                                </Box>
+
+                                <Stack direction="row" spacing={1}>
+                                    <Button
+                                        variant="contained"
+                                        size="small"
+                                        onClick={handleLinkTag}
+                                        disabled={!linkedTag || loading || loadingSuggestions}
+                                        startIcon={loading ? <CircularProgress size={16} /> : <LinkIcon />}
+                                        sx={{ flex: 1 }}
+                                    >
+                                        {loading ? 'Auto-saving & Linking...' : 'Link Tag'}
+                                    </Button>
+                                </Stack>
+
+                                {tagSuggestions.length === 0 && !loadingSuggestions && (
+                                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                                        No compatible tags found. Create tags in the Tags page first.
+                                    </Typography>
+                                )}
+                            </CardContent>
+                        </Card>
+                    )}
+                </Box>
+
+                <Divider />
+
+                {/* Element Settings */}
+                <Box>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 2 }}>
+                        Display Settings
+                    </Typography>
+
+                    <Stack spacing={2}>
+                        <TextField
+                            label="Display Name"
+                            value={displayName}
+                            size="small"
+                            fullWidth
+                            onChange={(e) => {
+                                setDisplayName(e.target.value);
+                                throttledUpdate(selectedElement.id, {
+                                    ...selectedElement,
+                                    displayName: e.target.value
+                                });
+                            }}
+                        />
+
+                        <TextField
+                            label="Color"
+                            type="color"
+                            value={color}
+                            size="small"
+                            fullWidth
+                            onChange={(e) => {
+                                setColor(e.target.value);
+                                throttledUpdate(selectedElement.id, {
+                                    ...selectedElement,
+                                    color: e.target.value
+                                });
+                            }}
+                        />
+
+                        {selectedElement.key === 'sensor' && (
+                            <FormControl fullWidth size="small">
+                                <InputLabel>Sensor Type</InputLabel>
+                                <Select
+                                    value={sensorType}
+                                    onChange={(e) => {
+                                        setSensorType(e.target.value);
+                                        throttledUpdate(selectedElement.id, {
+                                            ...selectedElement,
+                                            sensorType: e.target.value
+                                        });
+                                    }}
+                                    label="Sensor Type"
+                                >
+                                    {Object.entries(sensorTypes).map(([key, type]) => (
+                                        <MenuItem key={key} value={key}>
+                                            {type.label}
+                                        </MenuItem>
+                                    ))}
+                                </Select>
+                            </FormControl>
+                        )}
+
+                        <FormControlLabel
+                            control={
+                                <Switch
+                                    defaultChecked={selectedElement.displaySettings?.showValue !== false}
+                                    onChange={(e) => {
+                                        throttledUpdate(selectedElement.id, {
+                                            ...selectedElement,
+                                            displaySettings: {
+                                                ...selectedElement.displaySettings,
+                                                showValue: e.target.checked
+                                            }
+                                        });
+                                    }}
+                                />
+                            }
+                            label="Show Real-time Value"
+                        />
+
+                        <FormControlLabel
+                            control={
+                                <Switch
+                                    defaultChecked={selectedElement.displaySettings?.showAlarmStatus !== false}
+                                    onChange={(e) => {
+                                        throttledUpdate(selectedElement.id, {
+                                            ...selectedElement,
+                                            displaySettings: {
+                                                ...selectedElement.displaySettings,
+                                                showAlarmStatus: e.target.checked
+                                            }
+                                        });
+                                    }}
+                                />
+                            }
+                            label="Show Alarm Status"
+                        />
+                    </Stack>
+                </Box>
             </Stack>
         </Box>
     );
-}
+}, (prevProps, nextProps) => {
+    // 🚀 PERFORMANCE FIX 5: Better comparison function to prevent unnecessary re-renders
+    const prevSelected = prevProps.selectedElement;
+    const nextSelected = nextProps.selectedElement;
 
-// Advanced Tools Sidebar
-function AdvancedToolsSidebar({
-                                  selectedElement,
-                                  onAddSymbol,
-                                  onPipeMode,
-                                  isPipeMode,
-                                  onDelete,
-                                  deleteEnabled,
-                                  onUpdateElement,
-                                  tags,
-                                  devices,
-                                  measurements,
-                                  isConnected,
-                                  onExportTemplate,
-                                  onImportTemplate,
-                                  onLoadSaved,
-                                  onNewDiagram,
-                                  onSave,
-                                  saving
-                              }) {
+    if (prevSelected?.id !== nextSelected?.id) return false;
+    if (prevSelected?.linkedTag !== nextSelected?.linkedTag) return false;
+    if (prevProps.isConnected !== nextProps.isConnected) return false;
+    if (prevProps.projectId !== nextProps.projectId) return false;
+    if (prevProps.onSaveDiagram !== nextProps.onSaveDiagram) return false; // Check save function
+
+    // Only check measurements for the linked tag, not all measurements
+    const linkedTag = nextSelected?.linkedTag;
+    if (linkedTag) {
+        const prevMeasurement = prevProps.measurements[linkedTag];
+        const nextMeasurement = nextProps.measurements[linkedTag];
+
+        if (prevMeasurement?.value !== nextMeasurement?.value) return false;
+        if (prevMeasurement?.timestamp !== nextMeasurement?.timestamp) return false;
+    }
+
+    return true;
+});
+
+// 🚀 PERFORMANCE FIX 6: Heavily optimized Tools Sidebar
+const AdvancedToolsSidebar = React.memo(function AdvancedToolsSidebar({
+                                                                          selectedElement,
+                                                                          onAddSymbol,
+                                                                          onPipeMode,
+                                                                          isPipeMode,
+                                                                          onDelete,
+                                                                          deleteEnabled,
+                                                                          onUpdateElement,
+                                                                          tags,
+                                                                          devices,
+                                                                          measurements,
+                                                                          isConnected,
+                                                                          onExportTemplate,
+                                                                          onImportTemplate,
+                                                                          onLoadSaved,
+                                                                          onNewDiagram,
+                                                                          onSave,
+                                                                          saving,
+                                                                          projectId,
+                                                                          getTagDataByName
+                                                                      }) {
     const [activeTab, setActiveTab] = useState(0);
 
     return (
@@ -243,17 +722,16 @@ function AdvancedToolsSidebar({
             variant="permanent"
             anchor="right"
             sx={{
-                width: 350,
+                width: 400,
                 flexShrink: 0,
                 '& .MuiDrawer-paper': {
-                    width: 350,
+                    width: 400,
                     boxSizing: 'border-box',
                     background: 'linear-gradient(180deg, #ffffff 0%, #f8fafc 100%)',
                     borderLeft: '1px solid #e2e8f0',
                 },
             }}
         >
-            {/* Tabs */}
             <Tabs
                 value={activeTab}
                 onChange={(e, newValue) => setActiveTab(newValue)}
@@ -263,7 +741,6 @@ function AdvancedToolsSidebar({
                 <Tab label="Properties" />
             </Tabs>
 
-            {/* Tools Tab */}
             {activeTab === 0 && (
                 <Box sx={{ p: 2 }}>
                     {/* Save & Diagram Management */}
@@ -295,7 +772,7 @@ function AdvancedToolsSidebar({
                                 </Button>
                                 <Divider />
                                 <Button
-                                    startIcon={<SaveIcon />}
+                                    startIcon={<VisibilityIcon />}
                                     onClick={onLoadSaved}
                                     variant="outlined"
                                     size="small"
@@ -344,9 +821,6 @@ function AdvancedToolsSidebar({
                                     Import Template
                                 </Button>
                             </Stack>
-                            <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                                Templates are reusable diagram layouts without data bindings
-                            </Typography>
                         </CardContent>
                     </Card>
 
@@ -416,20 +890,31 @@ function AdvancedToolsSidebar({
                 </Box>
             )}
 
-            {/* Properties Tab */}
             {activeTab === 1 && (
-                <ElementPropertiesPanel
+                <EnhancedElementPropertiesPanel
                     selectedElement={selectedElement}
                     onUpdateElement={onUpdateElement}
                     tags={tags}
-                    devices={devices}
                     measurements={measurements}
                     isConnected={isConnected}
+                    projectId={projectId}
+                    getTagDataByName={getTagDataByName}
+                    onSaveDiagram={onSave} // 🚀 Pass save function for auto-save before linking
                 />
             )}
         </Drawer>
     );
-}
+}, (prevProps, nextProps) => {
+    // Only re-render if critical props change
+    return (
+        prevProps.selectedElement?.id === nextProps.selectedElement?.id &&
+        prevProps.isPipeMode === nextProps.isPipeMode &&
+        prevProps.deleteEnabled === nextProps.deleteEnabled &&
+        prevProps.isConnected === nextProps.isConnected &&
+        prevProps.saving === nextProps.saving &&
+        prevProps.projectId === nextProps.projectId
+    );
+});
 
 const CANVAS_WIDTH = 1200;
 const CANVAS_HEIGHT = 800;
@@ -439,8 +924,19 @@ export default function DiagramEditorPage() {
     const navigate = useNavigate();
     const stageRef = useRef();
 
-    // WebSocket for real-time data
-    const { measurements, isConnected, getTagValue } = useRealTimeData(projectId);
+    // Use your existing WebSocket hook
+    const {
+        measurements,
+        isConnected,
+        getTagValue,
+        getTagTimestamp,
+        connectionAttempts,
+        error,
+        getTagValueByName,
+        getTagDataByName,
+        getTagTimestampByName,
+        requestDiagramData
+    } = useRealTimeData(projectId);
 
     // State
     const [elements, setElements] = useState([]);
@@ -454,26 +950,45 @@ export default function DiagramEditorPage() {
     const [tags, setTags] = useState([]);
     const [devices, setDevices] = useState([]);
 
+    // 🚀 PERFORMANCE FIX 7: Debounced measurements to prevent excessive updates
+    const [debouncedMeasurements, setDebouncedMeasurements] = useState({});
+
+    useEffect(() => {
+        const timeoutId = setTimeout(() => {
+            setDebouncedMeasurements(measurements);
+        }, 200); // Update UI at most every 200ms
+
+        return () => clearTimeout(timeoutId);
+    }, [measurements]);
+
     // Load diagram, tags, and devices
     useEffect(() => {
         if (!projectId) return;
 
-        console.log('Loading diagram for project:', projectId);
+        throttledLog('📊 Loading diagram for project:', projectId);
+
+        // Request real-time diagram data if connected
+        if (isConnected && requestDiagramData) {
+            setTimeout(() => {
+                try {
+                    requestDiagramData(projectId);
+                } catch (error) {
+                    console.log('⚠️ Diagram real-time data not supported by server');
+                }
+            }, 2000);
+        }
 
         // Load diagram
         setLoading(true);
         axios.get(`/diagrams/project/${projectId}`)
             .then(res => {
-                console.log('Diagram response:', res.data);
-
-                // Handle both old and new format
                 let diagramData = [];
                 if (res.data.diagram_json) {
                     if (typeof res.data.diagram_json === 'string') {
                         try {
                             diagramData = JSON.parse(res.data.diagram_json);
                         } catch (e) {
-                            console.error('Error parsing diagram JSON:', e);
+                            console.error('❌ Error parsing diagram JSON:', e);
                             diagramData = [];
                         }
                     } else if (Array.isArray(res.data.diagram_json)) {
@@ -481,12 +996,11 @@ export default function DiagramEditorPage() {
                     }
                 }
 
-                console.log('Parsed diagram data:', diagramData);
                 setElements(diagramData);
                 setLoading(false);
             })
             .catch(err => {
-                console.error('Error loading diagram:', err);
+                console.error('❌ Error loading diagram:', err);
                 setLoading(false);
                 setSnackbar({ open: true, message: "Failed to load diagram", severity: "error" });
             });
@@ -495,7 +1009,6 @@ export default function DiagramEditorPage() {
         axios.get(`/devices/project/${projectId}`)
             .then(res => {
                 setDevices(res.data);
-                // Load tags for all devices
                 const tagPromises = res.data.map(device =>
                     axios.get(`/tags/device/${device.device_id}`)
                 );
@@ -506,13 +1019,59 @@ export default function DiagramEditorPage() {
                 setTags(allTags);
             })
             .catch(err => {
-                console.error('Error loading project data:', err);
+                console.error('❌ Error loading project data:', err);
                 setSnackbar({ open: true, message: "Failed to load project data", severity: "error" });
             });
-    }, [projectId]);
+    }, [projectId, isConnected, requestDiagramData]);
+
+    // 🚀 PERFORMANCE FIX 8: Optimized device status calculation
+    const getDeviceStatus = useCallback((element) => {
+        if (!isConnected) return 'offline';
+        if (!element.linkedTag) return element.status || 'online';
+
+        const measurementData = getTagDataByName(element.linkedTag);
+        if (!measurementData) return 'warning';
+        if (measurementData.quality === 'good' || measurementData.status === 'GOOD') return 'online';
+        return 'error';
+    }, [isConnected, getTagDataByName]);
+
+    // 🚀 PERFORMANCE FIX 9: Optimized device data with minimal recalculation
+    const getDeviceData = useCallback((element) => {
+        const baseData = {
+            connected: isConnected && element.linkedTag ? !!getTagValueByName(element.linkedTag) : isConnected,
+            status: getDeviceStatus(element)
+        };
+
+        if (!element.linkedTag) return baseData;
+
+        const measurementData = getTagDataByName(element.linkedTag);
+        const tagValue = measurementData?.value;
+
+        switch (element.key) {
+            case 'tank':
+                return { ...baseData, fillLevel: tagValue !== undefined ? tagValue : element.fillLevel || 75 };
+            case 'pump':
+                return { ...baseData, speed: tagValue !== undefined ? tagValue : element.speed || 1450 };
+            case 'valve':
+                return { ...baseData, position: tagValue !== undefined ? tagValue : element.position || 100 };
+            case 'motor':
+                return { ...baseData, rpm: tagValue !== undefined ? tagValue : element.rpm || 1450 };
+            case 'sensor':
+                return {
+                    ...baseData,
+                    value: tagValue,
+                    unit: measurementData?.engineering_unit || '',
+                    sensorType: element.sensorType || 'temperature'
+                };
+            case 'pipe':
+                return { ...baseData, flowDirection: element.flowDirection || 'right' };
+            default:
+                return baseData;
+        }
+    }, [isConnected, getTagValueByName, getTagDataByName, getDeviceStatus]);
 
     // Add modern symbol with enhanced properties
-    function handleAddSymbol(key) {
+    const handleAddSymbol = useCallback((key) => {
         const sym = symbolList.find(s => s.key === key);
         if (!sym) return;
 
@@ -534,101 +1093,33 @@ export default function DiagramEditorPage() {
             sensorType: sym.key === 'sensor' ? 'temperature' : undefined
         };
 
-        console.log('Adding new modern element:', newElement);
         setElements(prev => [...prev, newElement]);
         setSelectedId(id);
         setSnackbar({ open: true, message: `${sym.label} added to canvas`, severity: "success" });
-    }
-
-    // Get real-time device status
-    const getDeviceStatus = (element) => {
-        if (!isConnected) return 'offline';
-        if (!element.linkedTag) return element.status || 'online';
-
-        const tagValue = getTagValue(element.linkedTag);
-        if (tagValue === null || tagValue === undefined) return 'warning';
-
-        return 'online';
-    };
-
-    // Get real-time device data
-    const getDeviceData = (element) => {
-        const baseData = {
-            connected: isConnected && element.linkedTag ? !!getTagValue(element.linkedTag) : isConnected,
-            status: getDeviceStatus(element)
-        };
-
-        if (!element.linkedTag) return baseData;
-
-        const tagValue = getTagValue(element.linkedTag);
-
-        switch (element.key) {
-            case 'tank':
-                return {
-                    ...baseData,
-                    fillLevel: tagValue || element.fillLevel || 75
-                };
-            case 'pump':
-                return {
-                    ...baseData,
-                    speed: tagValue || element.speed || 1450
-                };
-            case 'valve':
-                return {
-                    ...baseData,
-                    position: tagValue || element.position || 100
-                };
-            case 'motor':
-                return {
-                    ...baseData,
-                    rpm: tagValue || element.rpm || 1450
-                };
-            case 'sensor':
-                return {
-                    ...baseData,
-                    value: tagValue
-                };
-            case 'pipe':
-                return {
-                    ...baseData,
-                    flowDirection: element.flowDirection || 'right'
-                };
-            default:
-                return baseData;
-        }
-    };
+    }, []);
 
     // Pipe mode handler
-    function startPipeMode() {
+    const startPipeMode = useCallback(() => {
         setIsPipeMode(!isPipeMode);
         setPipePoints([]);
         setSelectedId(null);
-        console.log('Pipe mode:', !isPipeMode);
-    }
+    }, [isPipeMode]);
 
     // Canvas click handler
-    function handleCanvasClick(e) {
-        console.log('Canvas clicked, pipe mode:', isPipeMode);
-
+    const handleCanvasClick = useCallback((e) => {
         if (isPipeMode) {
             const clickedShape = e.target;
-            console.log('Clicked shape:', clickedShape);
-
-            // Get id from Group or shape
             const clickedId = clickedShape && clickedShape.getParent()
                 ? clickedShape.getParent().attrs.id
                 : clickedShape.attrs.id;
-            console.log('Clicked ID:', clickedId);
 
             const clicked = elements.find(el => el.type === 'symbol' && clickedId === el.id);
-            console.log('Found element:', clicked);
 
             if (clicked) {
                 const centerX = clicked.x + clicked.width / 2;
                 const centerY = clicked.y + clicked.height / 2;
                 const newPoint = { x: centerX, y: centerY, id: clicked.id };
                 const pts = [...pipePoints, newPoint];
-                console.log('Pipe points:', pts);
 
                 if (pts.length === 2) {
                     const newPipe = {
@@ -639,48 +1130,43 @@ export default function DiagramEditorPage() {
                         status: 'online',
                         active: true
                     };
-                    console.log('Creating pipe connection:', newPipe);
                     setElements(prev => [...prev, newPipe]);
                     setPipePoints([]);
                     setIsPipeMode(false);
                     setSnackbar({ open: true, message: "Pipe connection created", severity: "success" });
                 } else {
                     setPipePoints(pts);
-                    console.log('First point set, waiting for second');
                 }
             }
             return;
         }
 
-        // Normal click - deselect if clicking empty area
         if (e.target === e.target.getStage()) {
             setSelectedId(null);
         }
-    }
+    }, [isPipeMode, elements, pipePoints]);
 
     // Update element properties
-    function handleUpdateElement(elementId, updatedElement) {
+    const handleUpdateElement = useCallback((elementId, updatedElement) => {
         setElements(prev =>
             prev.map(el => el.id === elementId ? updatedElement : el)
         );
         setSnackbar({ open: true, message: "Element updated", severity: "success" });
-    }
+    }, []);
 
     // Drag handler
-    function handleDrag(id, newX, newY) {
+    const handleDrag = useCallback((id, newX, newY) => {
         setElements(prev =>
             prev.map(el =>
                 el.id === id ? { ...el, x: newX, y: newY } : el
             )
         );
-    }
+    }, []);
 
     // Save diagram to database
-    function handleSave() {
+    const handleSave = useCallback(() => {
         if (!projectId) return;
         setSaving(true);
-
-        console.log('Saving modern elements to database:', elements);
 
         const saveData = {
             diagram_json: elements,
@@ -692,39 +1178,47 @@ export default function DiagramEditorPage() {
                 has_data_bindings: elements.some(el => el.linkedTag),
                 symbol_types: [...new Set(elements.map(el => el.key))],
                 modern_symbols: true,
-                real_time_enabled: isConnected
+                real_time_enabled: isConnected,
+                linked_elements: elements.filter(el => el.linkedTag).length
             }
         };
 
-        axios.post(`/diagrams/project/${projectId}`, saveData)
+        return axios.post(`/diagrams/project/${projectId}`, saveData)
             .then(() => {
                 setSaving(false);
                 setSnackbar({
                     open: true,
-                    message: `Modern SCADA diagram saved! ${elements.length} elements with real-time status.`,
+                    message: `✅ Modern SCADA diagram saved! ${elements.length} elements, ${elements.filter(el => el.linkedTag).length} linked to tags.`,
                     severity: "success"
                 });
+                return true; // Indicate success
             })
             .catch(err => {
-                console.error('Save error:', err);
+                console.error('❌ Save error:', err);
                 setSaving(false);
                 setSnackbar({ open: true, message: "Failed to save diagram", severity: "error" });
+                throw err; // Re-throw for caller to handle
             });
-    }
+    }, [projectId, elements, isConnected]);
 
     // Delete selected element
-    function deleteSelected() {
+    const deleteSelected = useCallback(() => {
         if (!selectedId) return;
         const element = elements.find(el => el.id === selectedId);
         setElements(prev => prev.filter(el => el.id !== selectedId));
         setSelectedId(null);
         setSnackbar({ open: true, message: `${element?.displayName || 'Element'} deleted`, severity: "info" });
-    }
+    }, [selectedId, elements]);
 
     // Export diagram as template
-    function handleExportTemplate() {
+    const handleExportTemplate = useCallback(() => {
         const exportData = {
-            diagram: elements,
+            diagram: elements.map(el => ({
+                ...el,
+                linkedTag: null,
+                linkedTagId: null,
+                realtime_data: null
+            })),
             metadata: {
                 version: "3.0",
                 exported: new Date().toISOString(),
@@ -743,10 +1237,10 @@ export default function DiagramEditorPage() {
         URL.revokeObjectURL(url);
 
         setSnackbar({ open: true, message: "Modern SCADA template exported successfully", severity: "success" });
-    }
+    }, [elements, projectId]);
 
     // Import diagram template
-    function handleImportTemplate() {
+    const handleImportTemplate = useCallback(() => {
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = '.json';
@@ -783,10 +1277,10 @@ export default function DiagramEditorPage() {
             }
         };
         input.click();
-    }
+    }, []);
 
     // Load saved diagram
-    function handleLoadSaved() {
+    const handleLoadSaved = useCallback(() => {
         if (!projectId) return;
 
         setLoading(true);
@@ -815,10 +1309,10 @@ export default function DiagramEditorPage() {
                 setLoading(false);
                 setSnackbar({ open: true, message: "Failed to load saved diagram", severity: "error" });
             });
-    }
+    }, [projectId]);
 
     // New diagram
-    function handleNewDiagram() {
+    const handleNewDiagram = useCallback(() => {
         if (elements.length > 0) {
             const confirmed = window.confirm(
                 "Are you sure you want to create a new diagram? Unsaved changes will be lost."
@@ -831,7 +1325,7 @@ export default function DiagramEditorPage() {
         setPipePoints([]);
         setIsPipeMode(false);
         setSnackbar({ open: true, message: "New modern diagram created", severity: "info" });
-    }
+    }, [elements.length]);
 
     // Update pipe connections when devices move
     useEffect(() => {
@@ -858,20 +1352,20 @@ export default function DiagramEditorPage() {
         });
     }, [elements.filter(e => e.type === 'symbol').map(s => [s.x, s.y, s.id]).flat().join(',')]);
 
-    // Get selected element
-    const selectedElement = elements.find(el => el.id === selectedId);
+    // Selected element
+    const selectedElement = useMemo(() => {
+        return elements.find(el => el.id === selectedId);
+    }, [elements, selectedId]);
 
-    // Render modern elements with real-time data
-    function renderElements() {
-        console.log('Rendering modern elements:', elements);
-
+    // 🚀 PERFORMANCE FIX 10: Heavily optimized element rendering with stricter dependencies
+    const renderedElements = useMemo(() => {
         return elements.map(el => {
             if (el.visible === false) return null;
 
             if (el.type === 'symbol') {
                 const sym = symbolList.find(s => s.key === el.key);
                 if (!sym) {
-                    console.warn('Modern symbol not found for key:', el.key);
+                    console.warn('❌ Modern symbol not found for key:', el.key);
                     return null;
                 }
                 const Component = sym.icon;
@@ -887,10 +1381,7 @@ export default function DiagramEditorPage() {
                         height={el.height}
                         draggable
                         selected={selectedId === el.id}
-                        onClick={() => {
-                            console.log('Modern element clicked:', el.id);
-                            setSelectedId(el.id);
-                        }}
+                        onClick={() => setSelectedId(el.id)}
                         onTap={() => setSelectedId(el.id)}
                         onDragEnd={e => {
                             handleDrag(el.id, e.target.x(), e.target.y());
@@ -903,6 +1394,12 @@ export default function DiagramEditorPage() {
                         position={deviceData.position}
                         rpm={deviceData.rpm}
                         sensorType={el.sensorType}
+                        value={deviceData.value}
+                        unit={deviceData.unit}
+                        color={el.color}
+                        displayName={el.displayName}
+                        showValue={el.displaySettings?.showValue !== false}
+                        showAlarmStatus={el.displaySettings?.showAlarmStatus !== false}
                     />
                 );
             }
@@ -925,10 +1422,16 @@ export default function DiagramEditorPage() {
             }
             return null;
         });
-    }
+    }, [
+        elements,
+        selectedId,
+        getDeviceData,
+        handleDrag,
+        debouncedMeasurements // 🚀 Use debounced measurements instead of direct measurements
+    ]);
 
     // Render temp pipe preview
-    function renderTempPipe() {
+    const renderTempPipe = useCallback(() => {
         if (pipePoints.length === 1) {
             return (
                 <Line
@@ -945,7 +1448,7 @@ export default function DiagramEditorPage() {
             );
         }
         return null;
-    }
+    }, [pipePoints]);
 
     return (
         <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
@@ -975,10 +1478,10 @@ export default function DiagramEditorPage() {
 
                     <Box sx={{ flexGrow: 1 }}>
                         <Typography variant="h5" sx={{ fontWeight: 700, lineHeight: 1 }}>
-                            Modern SCADA HMI Designer
+                            Enhanced SCADA HMI Designer
                         </Typography>
                         <Typography variant="caption" color="text.secondary">
-                            Industrial Process Monitoring Interface
+                            Industrial Process Monitoring with Tag Binding
                         </Typography>
                     </Box>
 
@@ -999,14 +1502,14 @@ export default function DiagramEditorPage() {
                         </Badge>
                         <Chip
                             icon={isConnected ? <WifiIcon /> : <WifiOffIcon />}
-                            label={isConnected ? 'Live Data' : 'Offline'}
-                            color={isConnected ? 'success' : 'default'}
+                            label={isConnected ? 'Live Data' : error ? `Error: ${error}` : 'Offline'}
+                            color={isConnected ? 'success' : error ? 'error' : 'default'}
                             size="small"
                             sx={{ fontWeight: 600 }}
                         />
                         <Chip
                             icon={<MemoryIcon />}
-                            label={`${Object.keys(measurements).length} Tags`}
+                            label={`${Object.keys(debouncedMeasurements).length} Tags`}
                             color="info"
                             size="small"
                             sx={{ fontWeight: 600 }}
@@ -1094,7 +1597,7 @@ export default function DiagramEditorPage() {
                                     <SettingsIcon sx={{ fontSize: 48, color: 'primary.main' }} />
                                 </motion.div>
                                 <Typography variant="h6" sx={{ ml: 2, color: 'text.secondary' }}>
-                                    Loading modern SCADA diagram...
+                                    Loading enhanced SCADA diagram...
                                 </Typography>
                             </Box>
                         ) : (
@@ -1111,7 +1614,7 @@ export default function DiagramEditorPage() {
                                 }}
                             >
                                 <Layer>
-                                    {renderElements()}
+                                    {renderedElements}
                                     {renderTempPipe()}
                                 </Layer>
                             </Stage>
@@ -1152,17 +1655,26 @@ export default function DiagramEditorPage() {
                             {isConnected && (
                                 <Chip
                                     icon={<WifiIcon />}
-                                    label="Real-time Data Active"
+                                    label={`Live: ${Object.keys(debouncedMeasurements).length} tags`}
                                     color="success"
                                     size="small"
                                     sx={{ bgcolor: 'rgba(76, 175, 80, 0.9)', color: 'white' }}
+                                />
+                            )}
+                            {!isConnected && error && (
+                                <Chip
+                                    icon={<WifiOffIcon />}
+                                    label={`Error: ${error}`}
+                                    color="error"
+                                    size="small"
+                                    sx={{ bgcolor: 'rgba(244, 67, 54, 0.9)', color: 'white' }}
                                 />
                             )}
                         </Box>
                     </Paper>
                 </Box>
 
-                {/* Tools Sidebar */}
+                {/* Enhanced Tools Sidebar */}
                 <AdvancedToolsSidebar
                     selectedElement={selectedElement}
                     onAddSymbol={handleAddSymbol}
@@ -1173,7 +1685,7 @@ export default function DiagramEditorPage() {
                     onUpdateElement={handleUpdateElement}
                     tags={tags}
                     devices={devices}
-                    measurements={measurements}
+                    measurements={debouncedMeasurements}
                     isConnected={isConnected}
                     onExportTemplate={handleExportTemplate}
                     onImportTemplate={handleImportTemplate}
@@ -1181,10 +1693,12 @@ export default function DiagramEditorPage() {
                     onNewDiagram={handleNewDiagram}
                     onSave={handleSave}
                     saving={saving}
+                    projectId={projectId}
+                    getTagDataByName={getTagDataByName}
                 />
             </Box>
 
-            {/* Modern Snackbar */}
+            {/* Enhanced Modern Snackbar */}
             <ModernSnackbar
                 open={snackbar.open}
                 onClose={() => setSnackbar(s => ({ ...s, open: false }))}

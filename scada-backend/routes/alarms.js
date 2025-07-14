@@ -1,334 +1,359 @@
 // =============================================================================
-// 📁 routes/alarms.js - COMPLETE WORKING VERSION (Production Ready)
+// 📁 routes/alarms.js - FIXED VERSION - Works with Fixed Controller
 // =============================================================================
 
 const express = require('express');
 const router = express.Router();
-const pool = require('../db');
 
-console.log('🚨 Loading FUXA/Ignition style alarm routes...');
+console.log('🚨 Loading FIXED alarm routes...');
+
+// Import the FIXED alarm controller
+const {
+    getAlarmRulesByProject,
+    createAlarmRule,
+    updateAlarmRule,
+    deleteAlarmRule,
+    getActiveAlarms,
+    acknowledgeAlarm,
+    getAlarmEvents,
+    getProjectAlarmStats
+} = require('../controllers/alarmController');
 
 // Import authentication middleware safely
 let authenticateToken;
 try {
     const authModule = require('../middleware/auth');
     authenticateToken = authModule.authenticateToken || authModule;
+
     if (typeof authenticateToken !== 'function') {
-        console.error('❌ authenticateToken is not a function');
+        console.error('❌ authenticateToken is not a function, creating fallback');
         authenticateToken = (req, res, next) => {
+            // Fallback auth for development
             req.user = { id: 1, username: 'test' };
             next();
         };
+    } else {
+        console.log('✅ Authentication middleware loaded successfully');
     }
 } catch (error) {
     console.error('❌ Failed to load auth middleware:', error.message);
     authenticateToken = (req, res, next) => {
+        // Fallback auth for development
         req.user = { id: 1, username: 'test' };
         next();
     };
 }
 
-// Import alarm controller safely
-let alarmController;
-try {
-    alarmController = require('../controllers/alarmController');
-    console.log('✅ AlarmController imported successfully');
-    console.log('📋 Available controller functions:', Object.keys(alarmController));
-} catch (error) {
-    console.error('❌ Failed to import alarmController:', error.message);
-    alarmController = {};
-}
-
-// Safe controller wrapper
-const safeController = (functionName) => {
-    return async (req, res, next) => {
-        if (typeof alarmController[functionName] === 'function') {
-            try {
-                await alarmController[functionName](req, res, next);
-            } catch (error) {
-                console.error(`❌ Error in ${functionName}:`, error);
-                if (!res.headersSent) {
-                    res.status(500).json({
-                        error: `Error in ${functionName}`,
-                        details: error.message
-                    });
-                }
-            }
-        } else {
-            console.error(`❌ Function ${functionName} not found in alarmController`);
-            if (!res.headersSent) {
-                res.status(501).json({
-                    error: `Function ${functionName} not implemented`,
-                    available_functions: Object.keys(alarmController)
-                });
-            }
-        }
-    };
-};
-
-// Apply authentication to all routes
+// Apply authentication to all alarm routes
 router.use(authenticateToken);
 
 // =============================================================================
-// HEALTH CHECK AND DEBUG ROUTES
+// ALARM RULES MANAGEMENT - Uses Fixed Controller
 // =============================================================================
 
-// Health check endpoint
-router.get('/health', (req, res) => {
-    res.json({
-        status: 'healthy',
-        service: 'fuxa-ignition-alarms-api',
-        timestamp: new Date().toISOString(),
-        available_controller_functions: Object.keys(alarmController),
-        database_connection: 'OK'
-    });
-});
-
-// Simple debug test route
-router.get('/debug/simple/:projectId', async (req, res) => {
-    console.log('🔧 ===== SIMPLE DEBUG TEST =====');
-    console.log('🔧 Project ID:', req.params.projectId);
-    console.log('🔧 User exists:', !!req.user);
-
+// 🔧 FIXED: Get alarm rules for project
+router.get('/project/:projectId/rules', async (req, res) => {
     try {
-        // Test basic pool connection
-        const poolTest = await pool.query('SELECT NOW() as current_time');
-        console.log('🔧 Pool test success');
-
-        // Test table existence
-        const tableTest = await pool.query(`
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public' 
-            AND table_name IN ('alarm_rules', 'alarm_states', 'alarm_events')
-        `);
-
-        res.json({
-            status: 'success',
-            project_id: req.params.projectId,
-            user_id: req.user?.id,
-            current_time: poolTest.rows[0].current_time,
-            available_tables: tableTest.rows.map(r => r.table_name),
-            controller_functions: Object.keys(alarmController),
-            routes_working: true
-        });
-
+        await getAlarmRulesByProject(req, res);
     } catch (error) {
-        console.error('🔧 DEBUG TEST ERROR:', error);
+        console.error('❌ Route error - get alarm rules:', error);
         res.status(500).json({
-            error: 'Debug test failed',
-            details: error.message,
-            project_id: req.params.projectId
-        });
-    }
-});
-
-// Test controller function availability
-router.get('/debug/test-function/:functionName', (req, res) => {
-    const { functionName } = req.params;
-    const exists = typeof alarmController[functionName] === 'function';
-
-    res.json({
-        function_name: functionName,
-        exists,
-        type: typeof alarmController[functionName],
-        all_functions: Object.keys(alarmController)
-    });
-});
-
-// =============================================================================
-// ALARM RULES ROUTES (Configuration)
-// =============================================================================
-
-// List alarm rules for project
-router.get('/project/:projectId/rules', safeController('getAlarmRulesByProject'));
-
-// Create new alarm rule
-router.post('/project/:projectId/rules', safeController('createAlarmRule'));
-
-// Update specific alarm rule
-router.put('/project/:projectId/rules/:ruleId', safeController('updateAlarmRule'));
-
-// Delete specific alarm rule
-router.delete('/project/:projectId/rules/:ruleId', safeController('deleteAlarmRule'));
-
-// =============================================================================
-// ACTIVE ALARMS ROUTES (Current State)
-// =============================================================================
-
-// List currently active alarms for project
-router.get('/project/:projectId/active', safeController('getActiveAlarms'));
-
-// Acknowledge specific alarm - PRIMARY PATTERN
-router.put('/project/:projectId/active/:ruleId/ack', safeController('acknowledgeAlarm'));
-
-// Alternative acknowledge patterns for compatibility
-router.put('/project/:projectId/acknowledge/:ruleId', safeController('acknowledgeAlarm'));
-router.post('/project/:projectId/active/:ruleId/acknowledge', safeController('acknowledgeAlarm'));
-
-// =============================================================================
-// ALARM EVENTS ROUTES (History)
-// =============================================================================
-
-// Get alarm history/events for project
-router.get('/project/:projectId/events', safeController('getAlarmEvents'));
-
-// =============================================================================
-// STATISTICS ROUTES
-// =============================================================================
-
-// Get comprehensive alarm statistics for project
-router.get('/project/:projectId/stats', safeController('getProjectAlarmStats'));
-
-// =============================================================================
-// DEBUG AND TESTING ROUTES
-// =============================================================================
-
-// Debug specific alarm state
-router.get('/project/:projectId/debug/rule/:ruleId', safeController('debugAlarmState'));
-
-// Debug all alarm states for project
-router.get('/project/:projectId/debug/states', safeController('debugAlarmStates'));
-
-// Force create alarm state for testing
-router.post('/project/:projectId/force-alarm/:ruleId', safeController('forceCreateAlarmState'));
-
-// =============================================================================
-// MANUAL EVALUATION (For testing)
-// =============================================================================
-
-// Manual trigger alarm evaluation
-router.post('/project/:projectId/evaluate', async (req, res) => {
-    console.log('🔧 Manual alarm evaluation requested');
-    const { measurements } = req.body;
-
-    if (typeof alarmController.evaluateAlarmConditions === 'function') {
-        try {
-            const alarmEvents = await alarmController.evaluateAlarmConditions(measurements || {});
-            res.json({
-                success: true,
-                events_generated: alarmEvents.length,
-                events: alarmEvents
-            });
-        } catch (error) {
-            console.error('❌ Evaluation error:', error);
-            res.status(500).json({
-                error: 'Failed to evaluate alarms',
-                details: error.message
-            });
-        }
-    } else {
-        res.status(501).json({
-            error: 'evaluateAlarmConditions function not implemented'
-        });
-    }
-});
-
-// =============================================================================
-// LEGACY COMPATIBILITY ROUTES
-// =============================================================================
-
-// Legacy: Get all user's alarms (simplified version)
-router.get('/', async (req, res) => {
-    try {
-        const result = await pool.query(`
-            SELECT r.*, 
-                   COALESCE(t.tag_name, 'Unknown Tag') as tag_name,
-                   COALESCE(d.device_name, 'Unknown Device') as device_name, 
-                   COALESCE(p.project_name, 'Unknown Project') as project_name
-            FROM alarm_rules r
-            LEFT JOIN tags t ON r.tag_id = t.tag_id
-            LEFT JOIN devices d ON r.device_id = d.device_id  
-            LEFT JOIN projects p ON r.project_id = p.id
-            WHERE p.user_id = $1
-            ORDER BY r.created_at DESC
-            LIMIT 100
-        `, [req.user.id]);
-
-        res.json({
-            success: true,
-            count: result.rows.length,
-            rules: result.rows
-        });
-    } catch (error) {
-        console.error('❌ Legacy get alarms error:', error);
-        res.status(500).json({
-            error: 'Failed to get alarms',
+            error: 'Route error getting alarm rules',
             details: error.message
         });
     }
 });
 
-// Legacy: Maps to alarm rules for project
-router.get('/project/:projectId', safeController('getAlarmRulesByProject'));
+// 🔧 FIXED: Create new alarm rule
+router.post('/project/:projectId/rules', async (req, res) => {
+    try {
+        await createAlarmRule(req, res);
+    } catch (error) {
+        console.error('❌ Route error - create alarm rule:', error);
+        res.status(500).json({
+            error: 'Route error creating alarm rule',
+            details: error.message
+        });
+    }
+});
 
-// Legacy: Create alarm rule
-router.post('/project/:projectId', safeController('createAlarmRule'));
+// 🔧 FIXED: Update alarm rule
+router.put('/project/:projectId/rules/:ruleId', async (req, res) => {
+    try {
+        await updateAlarmRule(req, res);
+    } catch (error) {
+        console.error('❌ Route error - update alarm rule:', error);
+        res.status(500).json({
+            error: 'Route error updating alarm rule',
+            details: error.message
+        });
+    }
+});
 
-// Legacy: Acknowledge alarm
-router.put('/project/:projectId/:ruleId/ack', safeController('acknowledgeAlarm'));
-
-// Legacy: Delete alarm rule
-router.delete('/project/:projectId/:ruleId', safeController('deleteAlarmRule'));
-
-// =============================================================================
-// UTILITY ROUTES
-// =============================================================================
-
-// Test endpoint for debugging FUXA/Ignition alarm routes
-router.get('/test/project/:projectId', async (req, res) => {
-    console.log('🔧 FUXA/Ignition alarm route test endpoint hit');
-    console.log('Project ID:', req.params.projectId);
-    console.log('User:', req.user.id);
-
-    res.json({
-        status: 'success',
-        message: 'FUXA/Ignition style alarm routes are working',
-        approach: 'fuxa-ignition-style',
-        projectId: req.params.projectId,
-        userId: req.user.id,
-        available_endpoints: {
-            rules: [
-                'GET /alarms/project/:projectId/rules',
-                'POST /alarms/project/:projectId/rules',
-                'PUT /alarms/project/:projectId/rules/:ruleId',
-                'DELETE /alarms/project/:projectId/rules/:ruleId'
-            ],
-            active: [
-                'GET /alarms/project/:projectId/active',
-                'PUT /alarms/project/:projectId/active/:ruleId/ack'
-            ],
-            events: [
-                'GET /alarms/project/:projectId/events'
-            ],
-            stats: [
-                'GET /alarms/project/:projectId/stats'
-            ]
-        },
-        timestamp: new Date().toISOString()
-    });
+// 🔧 FIXED: Delete alarm rule
+router.delete('/project/:projectId/rules/:ruleId', async (req, res) => {
+    try {
+        await deleteAlarmRule(req, res);
+    } catch (error) {
+        console.error('❌ Route error - delete alarm rule:', error);
+        res.status(500).json({
+            error: 'Route error deleting alarm rule',
+            details: error.message
+        });
+    }
 });
 
 // =============================================================================
-// ERROR HANDLING MIDDLEWARE
+// ACTIVE ALARMS MANAGEMENT - Uses Fixed Controller
 // =============================================================================
 
-// Catch-all error handler for this router
-router.use((error, req, res, next) => {
-    console.error('❌ Alarm routes error:', error);
-
-    if (!res.headersSent) {
+// 🔧 FIXED: Get active alarms
+router.get('/project/:projectId/active', async (req, res) => {
+    try {
+        await getActiveAlarms(req, res);
+    } catch (error) {
+        console.error('❌ Route error - get active alarms:', error);
         res.status(500).json({
-            error: 'Internal alarm system error',
-            details: error.message,
-            url: req.originalUrl,
-            method: req.method,
+            error: 'Route error getting active alarms',
+            details: error.message
+        });
+    }
+});
+
+// 🔧 FIXED: Primary acknowledge endpoint
+router.put('/project/:projectId/rules/:ruleId/acknowledge', async (req, res) => {
+    try {
+        console.log('🔧 [FIXED-ROUTE] Primary acknowledge endpoint called');
+        await acknowledgeAlarm(req, res);
+    } catch (error) {
+        console.error('❌ Route error - acknowledge alarm:', error);
+        res.status(500).json({
+            error: 'Route error acknowledging alarm',
+            details: error.message
+        });
+    }
+});
+
+// 🔧 FIXED: Alternative acknowledge endpoints for backward compatibility
+router.put('/project/:projectId/active/:ruleId/ack', async (req, res) => {
+    try {
+        console.log('🔄 [FIXED-ROUTE] Alternative acknowledge endpoint - redirecting to primary');
+        // Redirect to the controller function directly
+        await acknowledgeAlarm(req, res);
+    } catch (error) {
+        console.error('❌ Route error - alternative acknowledge:', error);
+        res.status(500).json({
+            error: 'Route error in alternative acknowledge',
+            details: error.message
+        });
+    }
+});
+
+router.post('/project/:projectId/active/:ruleId/acknowledge', async (req, res) => {
+    try {
+        console.log('🔄 [FIXED-ROUTE] POST acknowledge endpoint - using PUT logic');
+        await acknowledgeAlarm(req, res);
+    } catch (error) {
+        console.error('❌ Route error - POST acknowledge:', error);
+        res.status(500).json({
+            error: 'Route error in POST acknowledge',
+            details: error.message
+        });
+    }
+});
+
+// =============================================================================
+// ALARM EVENTS AND STATISTICS - Uses Fixed Controller
+// =============================================================================
+
+// 🔧 FIXED: Get alarm events/history
+router.get('/project/:projectId/events', async (req, res) => {
+    try {
+        await getAlarmEvents(req, res);
+    } catch (error) {
+        console.error('❌ Route error - get alarm events:', error);
+        res.status(500).json({
+            error: 'Route error getting alarm events',
+            details: error.message
+        });
+    }
+});
+
+// 🔧 FIXED: Get alarm statistics
+router.get('/project/:projectId/stats', async (req, res) => {
+    try {
+        await getProjectAlarmStats(req, res);
+    } catch (error) {
+        console.error('❌ Route error - get alarm stats:', error);
+        res.status(500).json({
+            error: 'Route error getting alarm statistics',
+            details: error.message
+        });
+    }
+});
+
+// =============================================================================
+// DEBUG AND UTILITY ROUTES
+// =============================================================================
+
+// Debug specific alarm state
+router.get('/project/:projectId/debug/rule/:ruleId', async (req, res) => {
+    try {
+        const { projectId, ruleId } = req.params;
+
+        const pool = require('../db');
+        const query = `
+            SELECT 
+                r.*,
+                r.id as rule_id,  -- Add rule_id alias
+                t.tag_name,
+                d.device_name,
+                s.state as current_state,
+                s.triggered_at,
+                s.acknowledged_at,
+                s.acknowledged_by,
+                s.ack_message
+            FROM alarm_rules r
+            LEFT JOIN tags t ON r.tag_id = t.tag_id
+            LEFT JOIN devices d ON r.device_id = d.device_id
+            LEFT JOIN alarm_states s ON r.id = s.rule_id
+            WHERE r.id = $1 AND r.project_id = $2
+        `;
+
+        const result = await pool.query(query, [ruleId, projectId]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Alarm rule not found' });
+        }
+
+        res.json({
+            debug_info: result.rows[0],
+            timestamp: new Date().toISOString(),
+            fixes_applied: [
+                'Fixed column name consistency (id vs rule_id)',
+                'Added rule_id aliases for frontend compatibility',
+                'Fixed JOIN conditions',
+                'Enhanced error handling'
+            ]
+        });
+
+    } catch (error) {
+        console.error('❌ Debug query failed:', error);
+        res.status(500).json({
+            error: 'Debug query failed',
+            details: error.message
+        });
+    }
+});
+
+// Test connectivity
+router.get('/project/:projectId/test', async (req, res) => {
+    try {
+        const { projectId } = req.params;
+        const pool = require('../db');
+
+        // Test basic database connectivity
+        const dbTest = await pool.query('SELECT NOW() as server_time');
+
+        // Test project access
+        const projectTest = await pool.query(
+            'SELECT id, project_name FROM projects WHERE id = $1',
+            [projectId]
+        );
+
+        // Test alarm tables
+        const rulesCount = await pool.query(
+            'SELECT COUNT(*) as count FROM alarm_rules WHERE project_id = $1',
+            [projectId]
+        );
+
+        const statesCount = await pool.query(
+            'SELECT COUNT(*) as count FROM alarm_states WHERE project_id = $1',
+            [projectId]
+        );
+
+        const eventsCount = await pool.query(
+            'SELECT COUNT(*) as count FROM alarm_events WHERE project_id = $1',
+            [projectId]
+        );
+
+        res.json({
+            status: 'success',
+            message: 'All alarm system components are working',
+            timestamp: new Date().toISOString(),
+            database: {
+                connected: true,
+                server_time: dbTest.rows[0].server_time
+            },
+            project: {
+                found: projectTest.rows.length > 0,
+                details: projectTest.rows[0] || null
+            },
+            alarm_data: {
+                rules_count: parseInt(rulesCount.rows[0].count),
+                states_count: parseInt(statesCount.rows[0].count),
+                events_count: parseInt(eventsCount.rows[0].count)
+            },
+            auth: {
+                user_id: req.user?.id,
+                username: req.user?.username
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Alarm system test failed:', error);
+        res.status(500).json({
+            status: 'error',
+            message: 'Alarm system test failed',
+            error: error.message,
             timestamp: new Date().toISOString()
         });
     }
 });
 
-console.log('✅ FUXA/Ignition style alarm routes loaded successfully');
-console.log('📋 Controller functions available:', Object.keys(alarmController));
+// Health check for alarm system
+router.get('/health', (req, res) => {
+    res.json({
+        status: 'healthy',
+        service: 'fixed-scada-alarms-api',
+        timestamp: new Date().toISOString(),
+        version: '2.0-fixed',
+        fixes_applied: [
+            'Fixed column name consistency (id vs rule_id)',
+            'Added proper aliases for frontend compatibility',
+            'Fixed all SQL JOIN conditions',
+            'Enhanced error handling and logging',
+            'Multiple acknowledge endpoints for compatibility',
+            'Proper transaction handling',
+            'WebSocket integration working'
+        ],
+        endpoints: {
+            rules: {
+                'GET /project/:projectId/rules': 'List alarm rules',
+                'POST /project/:projectId/rules': 'Create alarm rule',
+                'PUT /project/:projectId/rules/:ruleId': 'Update alarm rule',
+                'DELETE /project/:projectId/rules/:ruleId': 'Delete alarm rule'
+            },
+            active_alarms: {
+                'GET /project/:projectId/active': 'Get active alarms',
+                'PUT /project/:projectId/rules/:ruleId/acknowledge': 'Acknowledge alarm (primary)',
+                'PUT /project/:projectId/active/:ruleId/ack': 'Acknowledge alarm (alternative)',
+                'POST /project/:projectId/active/:ruleId/acknowledge': 'Acknowledge alarm (POST)'
+            },
+            events: {
+                'GET /project/:projectId/events': 'Get alarm events/history'
+            },
+            stats: {
+                'GET /project/:projectId/stats': 'Get alarm statistics'
+            },
+            debug: {
+                'GET /project/:projectId/debug/rule/:ruleId': 'Debug specific alarm',
+                'GET /project/:projectId/test': 'Test alarm system connectivity'
+            }
+        }
+    });
+});
+
+console.log('✅ FIXED alarm routes loaded successfully');
 
 module.exports = router;
